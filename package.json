@@ -24,7 +24,8 @@
     "test:coverage": "npm run typecheck && node --test --experimental-test-coverage --test-coverage-include=src/** test/*.test.ts",
     "build:pilot-engine": "node scripts/build-pilot-engine.mjs",
     "pretest:secure-pipeline": "npm run build:pilot-engine",
-    "pilot:verify": "node scripts/pilot/verify-infra.mjs"
+    "pilot:verify": "node scripts/pilot/verify-infra.mjs",
+    "source:matrix": "node scripts/source-evidence-matrix.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

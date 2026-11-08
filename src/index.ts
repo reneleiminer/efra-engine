@@ -62,3 +62,10 @@ export { establishPilotSession, PilotPersonRegistry } from "./pilot/identity.ts"
 export { FilePilotSecretBroker } from "./pilot/file-broker.ts";
 export type { PilotAlert } from "./pilot/operations.ts";
 export { alertForPilotFailure, resumePilotRun } from "./pilot/operations.ts";
+
+export type * from "./source-readiness/catalogue.ts";
+export { evidenceCoverageMatrix, assessSourceCoverage, evidenceCoverageVersion } from "./source-readiness/coverage.ts";
+export type * from "./source-readiness/adapters.ts";
+export { inspectSourceFixture, sourceAdapterVersion, statsNScoreDocumentedOperations } from "./source-readiness/adapters.ts";
+export type * from "./source-readiness/film-lab.ts";
+export { assessFilmAnnotation, filmLabContractVersion } from "./source-readiness/film-lab.ts";

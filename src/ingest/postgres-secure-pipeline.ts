@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import type { SnapshotRequest, StageReview } from "./postgres-stage-store.ts";
 import { PostgresApprovedSnapshotReader } from "./postgres-snapshot-reader.ts";
+import { canonicalSha256 } from "./determinism.ts";
 
 export const qbPassingProjection = "efra-qb-passing-v1";
 export type AuthenticatedReview = Omit<StageReview, "reviewerId">;
@@ -51,11 +51,7 @@ export class PostgresSecurePipeline {
     if (!projection) return null;
     const snapshot = await new PostgresApprovedSnapshotReader(this.#pool).readSnapshot(snapshotId);
     if (!snapshot) throw new Error("Released projection is missing its frozen snapshot");
-    const snapshotSha256 = createHash("sha256").update(JSON.stringify(snapshot, (_key, value: unknown) =>
-      value !== null && typeof value === "object" && !Array.isArray(value)
-        ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left < right ? -1 : left === right ? 0 : 1))
-        : value,
-    )).digest("hex");
+    const snapshotSha256 = canonicalSha256(snapshot);
     return {
       label: "SIMULATION", rankingEligible: false, snapshotId: projection.snapshot_id, projectionVersion: qbPassingProjection,
       schemaVersion: projection.schema_version, asOf: projection.cutoff.toISOString(), observationIds: projection.observation_ids,

@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
-import { compareId } from "../season/scope.ts";
+import { compareImportDecisions } from "./determinism.ts";
 import type { ImportCandidate, ImportManifest, ImportPlan, ImportRowDecision, ImportSourcePolicy } from "./contracts.ts";
-import { planImport } from "./plan.ts";
+import { candidateConflicts, planImport } from "./plan.ts";
 
 interface IdentityResult {
   readonly ordinal: number;
@@ -44,15 +44,15 @@ export class PostgresImportIdentityResolver {
         resolved.push({ ...candidate, game: { ...candidate.game, ...identity, seasonId: scope.season_id } });
       } else {
         const { sourceRecordId } = candidate;
+        const conflicts = candidateConflicts(candidate);
         quarantine.push({ sourceRecordId, status: "QUARANTINE", issues: [(counts.get(sourceRecordId) ?? 0) > 1
-          ? "DUPLICATE_RECORD" : "UNRESOLVED_OR_INCONSISTENT_IDENTITY"] });
+          ? "DUPLICATE_RECORD" : "UNRESOLVED_OR_INCONSISTENT_IDENTITY"], ...(conflicts.length && { conflicts }) });
       }
     }
 
     const canonicalScope = { competitionId: scope.competition_id, seasonId: scope.season_id };
     const plan = planImport({ ...manifest, ...canonicalScope }, { ...policy, ...canonicalScope }, resolved);
     if (plan.status === "BLOCKED") return plan;
-    return { ...plan, rows: [...plan.rows, ...quarantine].sort((left, right) => compareId(left.sourceRecordId, right.sourceRecordId)
-      || compareId(left.issues.join(","), right.issues.join(","))) };
+    return { ...plan, rows: [...plan.rows, ...quarantine].sort(compareImportDecisions) };
   }
 }

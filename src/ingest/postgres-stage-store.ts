@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { timestamp } from "../contracts/time.ts";
-import type { ImportCandidate, ImportPlan, ImportStageStore } from "./contracts.ts";
+import type { ImportCandidate, ImportPlan, ImportRowDecision, ImportStageStore } from "./contracts.ts";
+import { canonicalSha256 } from "./determinism.ts";
 
 type DryRun = Extract<ImportPlan, { status: "DRY_RUN" }>;
 
@@ -59,16 +59,20 @@ export class PostgresImportStageStore implements ImportStageStore {
     const predecessor = manifest.supersedesSourceRevision ?? null;
     const staged = [];
     const quarantine = [];
+    const conflicts: { decision_ordinal: number; conflicts: NonNullable<Extract<ImportRowDecision, { status: "QUARANTINE" }>["conflicts"]> }[] = [];
     for (const [index, row] of rows.entries()) {
       const decision = { source_record_id: row.sourceRecordId, issues: row.issues };
-      if (row.status === "QUARANTINE") quarantine.push({ ...decision, decision_ordinal: index + 1 });
+      if (row.status === "QUARANTINE") {
+        quarantine.push({ ...decision, decision_ordinal: index + 1 });
+        if (row.conflicts?.length) conflicts.push({ decision_ordinal: index + 1, conflicts: row.conflicts });
+      }
       else {
         const { game } = row.candidate;
         staged.push({ ...decision, game_id: game.gameId, player_id: game.playerId,
           position: game.position, status: row.status, game });
       }
     }
-    const fingerprint = createHash("sha256").update(canonicalJson(rows)).digest("hex");
+    const fingerprint = canonicalSha256(rows);
     const stagedJson = JSON.stringify(staged);
     const quarantineJson = JSON.stringify(quarantine);
 
@@ -126,6 +130,14 @@ export class PostgresImportStageStore implements ImportStageStore {
          FROM jsonb_to_recordset($2::jsonb) AS row(decision_ordinal integer, source_record_id text, issues text[])`,
         [batchId, quarantineJson],
       );
+      if (conflicts.length) {
+        await client.query(
+          `INSERT INTO efra_ingest.quarantine_conflict (batch_id, decision_ordinal, conflicts)
+           SELECT $1, decision_ordinal, conflicts
+           FROM jsonb_to_recordset($2::jsonb) AS row(decision_ordinal integer, conflicts jsonb)`,
+          [batchId, JSON.stringify(conflicts)],
+        );
+      }
       return "STAGED";
     });
   }
@@ -227,11 +239,4 @@ export class PostgresImportStageStore implements ImportStageStore {
       client.release(discard);
     }
   }
-}
-
-function canonicalJson(value: unknown): string {
-  return JSON.stringify(value, (_key, entry: unknown) => {
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return entry;
-    return Object.fromEntries(Object.entries(entry).sort(([left], [right]) => left < right ? -1 : left === right ? 0 : 1));
-  });
 }

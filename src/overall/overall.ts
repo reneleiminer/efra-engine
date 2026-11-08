@@ -5,7 +5,7 @@ import type { Position } from "../contracts/statistics.ts";
 import { timestamp } from "../contracts/time.ts";
 import { calibrateSimulation } from "../simulation/calibration.ts";
 import type { SimulationCalibration } from "../simulation/calibration.ts";
-import { describePositionModel } from "../models/positions/catalog.ts";
+import { describePositionModel, limitedPath } from "../models/positions/catalog.ts";
 
 export interface OverallEvidence {
   readonly label: "SIMULATION";
@@ -36,7 +36,7 @@ export function calculateOverall(
 ): RatingResult {
   const confidence = summarizeConfidence();
   const base = {
-    kind: "OVERALL", scope, origin, model: policy.version, confidence, flags: [], rankingEligible: false,
+    kind: "OVERALL", scope, origin, model: policy.version, evidenceModel: policy.evidenceModel, confidence, flags: [], rankingEligible: false,
   } as const;
   const blocked = (reason: RatingReason): RatingResult => ({
     ...base, history: [], simulationVariance: null, status: "NOT_RATED", reason, score: null,
@@ -105,9 +105,11 @@ function validSimulationVersion(version: ModelVersion, position: Position): bool
   if (comparison && (!comparison.leagueId.trim() || !["LEAGUE", "BRIDGE_REFERENCE"].includes(comparison.basis))) return false;
   if (position !== "QB") {
     const definition = describePositionModel(position);
+    const limited = limitedPath(version.path);
     return !!definition.tiers && version.fieldPosition === position && !!comparison
       && version.featureDefinitionVersion === definition.definitionVersion
-      && (version.path === "POSITION_CORE" || version.path === "POSITION_SUPPORTING" || version.path === "POSITION_ADVANCED");
+      && (version.path === "POSITION_CORE" || version.path === "POSITION_SUPPORTING" || version.path === "POSITION_ADVANCED"
+        || (limited?.position === position && comparison.basis === "LEAGUE"));
   }
   if (version.fieldPosition !== undefined || version.featureDefinitionVersion !== undefined) return false;
   switch (version.path) {

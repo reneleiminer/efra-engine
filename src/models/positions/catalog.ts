@@ -22,7 +22,17 @@ export interface FieldStatistics<P extends FieldPosition> {
 }
 
 export type FieldSeason<P extends FieldPosition> = SeasonStatistics<P, FieldStatistics<P>>;
-export type FieldPath = "POSITION_CORE" | "POSITION_SUPPORTING" | "POSITION_ADVANCED";
+export type LimitedFieldPath = "P_UNRETURNED_ONLY_V1" | "LS_PUNT_SNAP_ONLY_V1";
+export type FieldPath = "POSITION_CORE" | "POSITION_SUPPORTING" | "POSITION_ADVANCED" | LimitedFieldPath;
+
+export const limitedFieldPaths = {
+  P_UNRETURNED_ONLY_V1: { position: "P", requiresAbsent: "returnedFieldPosition" },
+  LS_PUNT_SNAP_ONLY_V1: { position: "LS", requiresAbsent: "placekickSnapAccuracy" },
+} as const satisfies Record<LimitedFieldPath, { position: FieldPosition; requiresAbsent: string }>;
+
+export function limitedPath(path: string) {
+  return Object.hasOwn(limitedFieldPaths, path) ? limitedFieldPaths[path as LimitedFieldPath] : undefined;
+}
 
 export function describePositionModel<P extends FieldPosition>(position: P) {
   return { position, definitionVersion: `efra-${position.toLowerCase()}-features-v1`, tiers: catalog[position] } as const;
@@ -33,5 +43,7 @@ export function positionComponents(definition: PositionDefinition, path: FieldPa
     case "POSITION_CORE": return definition.CORE;
     case "POSITION_SUPPORTING": return [...definition.CORE, ...definition.SUPPORTING];
     case "POSITION_ADVANCED": return [...definition.CORE, ...definition.SUPPORTING, ...definition.ADVANCED];
+    case "P_UNRETURNED_ONLY_V1":
+    case "LS_PUNT_SNAP_ONLY_V1": return definition.CORE.filter(({ id }) => id !== limitedFieldPaths[path].requiresAbsent);
   }
 }

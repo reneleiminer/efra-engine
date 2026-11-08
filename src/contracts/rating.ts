@@ -1,6 +1,7 @@
 import type { DataOrigin } from "./observations.ts";
 import type { Position } from "./statistics.ts";
 import type { FieldPath, FieldPosition } from "../models/positions/catalog.ts";
+import type { SeasonInputTrace } from "./lineage.ts";
 
 export type RatingKind = "SEASON_PERFORMANCE" | "OVERALL";
 export type RatingStatus = "NOT_RATED" | "PROVISIONAL" | "OFFICIAL";
@@ -9,7 +10,16 @@ export type QbPath = "QB_STANDARD_CORE" | "QB_EXTENDED_PRODUCTION" | "QB_ADVANCE
 export type RatingReason = "REAL_DATA_DISABLED" | "INVALID_SCOPE" | "INCOMPLETE_COVERAGE"
   | "UNVERIFIED_USAGE" | "NO_PASSING_EXPOSURE" | "MISSING_CORE" | "UNUSABLE_CORE"
   | "INVALID_CORE" | "MISSING_COMPONENT" | "NO_VALIDATED_MODEL_PATH" | "INVALID_MODEL_OUTPUT"
-  | "NO_COMPATIBLE_HISTORY" | "PASSING_EXPOSURE_IN_RUSH_ONLY" | "LEAGUE_CONTEXT_UNAVAILABLE";
+  | "NO_COMPATIBLE_HISTORY" | "PASSING_EXPOSURE_IN_RUSH_ONLY" | "LEAGUE_CONTEXT_UNAVAILABLE"
+  | "NO_COMPONENT_EXPOSURE" | "INSUFFICIENT_COMPONENT_EXPOSURE" | "LIMITED_PATH_OPPORTUNITY_PRESENT";
+
+export interface ComponentRatingIssue {
+  readonly componentId: string;
+  readonly gameId?: string;
+  readonly evidenceStatus?: "MISSING" | "INVALID" | "UNUSABLE";
+  readonly exposure?: number;
+  readonly minimumExposure?: number;
+}
 
 export interface ModelVersion {
   readonly methodVersion: string;
@@ -63,15 +73,17 @@ type ResultProduct =
       readonly schemaVersion: string;
       readonly stintIds: readonly string[];
       readonly leagueContextEvidenceIds?: readonly string[];
+      readonly inputTrace?: SeasonInputTrace;
     }
   | {
       readonly kind: "OVERALL";
       readonly history: readonly { readonly evidenceId: string; readonly dataVersion: string }[];
       readonly simulationVariance: number | null;
+      readonly evidenceModel: ModelVersion;
     };
 
 export type RatingResult = ResultBase & ResultProduct & (
-  | { readonly status: "NOT_RATED"; readonly reason: RatingReason; readonly score: null }
+  | { readonly status: "NOT_RATED"; readonly reason: RatingReason; readonly score: null; readonly componentIssue?: ComponentRatingIssue }
   | {
       readonly status: "PROVISIONAL";
       readonly label: "SIMULATION";

@@ -3,9 +3,12 @@ import { resolveLeagueAdjustment } from "../context/league-strength.ts";
 import type { LeagueStrengthEstimate } from "../context/league-strength.ts";
 import { isVerifiedSource, readObservation } from "../contracts/observations.ts";
 import type { Observation } from "../contracts/observations.ts";
-import type { ModelVersion, RatingReason, RatingResult } from "../contracts/rating.ts";
-import { describePositionModel, positionComponents } from "../models/positions/catalog.ts";
+import { traceGame } from "../contracts/lineage.ts";
+import type { SeasonGameTrace, SeasonInputTrace } from "../contracts/lineage.ts";
+import type { ComponentRatingIssue, ModelVersion, RatingReason, RatingResult } from "../contracts/rating.ts";
+import { describePositionModel, limitedPath, positionComponents } from "../models/positions/catalog.ts";
 import type { FieldComponentId, FieldPath, FieldPosition, FieldSeason } from "../models/positions/catalog.ts";
+import type { ComponentDefinition } from "../models/positions/metrics.ts";
 import { readComponent } from "../models/positions/evidence.ts";
 import type { ComponentSample } from "../models/positions/evidence.ts";
 import { calibrateSimulation } from "../simulation/calibration.ts";
@@ -16,6 +19,7 @@ interface ComponentParameters {
   readonly weight: number;
   readonly scale: number;
   readonly center: number;
+  readonly minimumExposure?: number;
 }
 
 export interface FieldSeasonSimulation<P extends FieldPosition> {
@@ -46,7 +50,11 @@ export function calculateFieldSeasonPerformance<P extends FieldPosition>(
   } as const;
   const expectedGames = stints.reduce((count, stint) => count + stint.expectedGameIds.length, 0);
   let confidence = summarizeConfidence(expectedGames);
-  const blocked = (reason: RatingReason): RatingResult => ({ ...base, confidence, status: "NOT_RATED", reason, score: null });
+  let inputTrace: SeasonInputTrace | undefined;
+  const blocked = (reason: RatingReason, componentIssue?: ComponentRatingIssue): RatingResult => ({
+    ...base, confidence, status: "NOT_RATED", reason, score: null,
+    ...(componentIssue && { componentIssue }), ...(inputTrace && { inputTrace }),
+  });
 
   if (origin !== "SYNTHETIC") return blocked("REAL_DATA_DISABLED");
   const scopeIssue = validateSeasonScope(input);
@@ -58,34 +66,49 @@ export function calculateFieldSeasonPerformance<P extends FieldPosition>(
     || !version.comparisonScope?.leagueId.trim()) return blocked("NO_VALIDATED_MODEL_PATH");
   const components = positionComponents(tiers, version.path);
   if (!components) return blocked("NO_VALIDATED_MODEL_PATH");
+  const limited = limitedPath(version.path);
+  if (limited && (limited.position !== position || version.comparisonScope.basis !== "LEAGUE")) {
+    return blocked("NO_VALIDATED_MODEL_PATH");
+  }
+  const excluded = limited && tiers.CORE.find(({ id }) => id === limited.requiresAbsent);
   const parameters: Readonly<Record<string, ComponentParameters | undefined>> = policy.components;
   const selected = components.flatMap((definition) => {
     const parameter = Object.hasOwn(parameters, definition.id) ? parameters[definition.id] : undefined;
     return parameter ? [{ definition, parameter, samples: [] as ComponentSample[] }] : [];
   });
   if (selected.length !== components.length || Object.keys(parameters).length !== components.length
-    || selected.some(({ parameter: { weight, scale, center } }) =>
-      ![weight, scale, center].every(Number.isFinite) || weight < 0 || scale <= 0)
+    || selected.some(({ parameter: { weight, scale, center, minimumExposure = 1 } }) =>
+      ![weight, scale, center].every(Number.isFinite) || weight < 0 || scale <= 0
+      || !Number.isSafeInteger(minimumExposure) || minimumExposure < 1)
     || Math.abs(selected.reduce((sum, { parameter }) => sum + parameter.weight, 0) - 1) > 1e-12) {
     return blocked("INVALID_MODEL_OUTPUT");
   }
   const adjustment = resolveLeagueAdjustment(season.leagueId, position, asOf, version, policy.leagueAdjustmentScale, context);
   if (adjustment === null) return blocked("LEAGUE_CONTEXT_UNAVAILABLE");
-  const fields = [...new Set(components.flatMap(({ numerator, denominator, expected }) =>
+  const evaluated: readonly { definition: ComponentDefinition; samples: ComponentSample[] | null }[] =
+    excluded ? [...selected, { definition: excluded, samples: null }] : selected;
+  const fields = [...new Set(evaluated.flatMap(({ definition: { numerator, denominator, expected } }) =>
     expected === undefined ? [numerator, denominator] : [numerator, denominator, expected]))];
+  const gameTraces: SeasonGameTrace[] = [];
+  inputTrace = {
+    snapshotAvailableAt: snapshot.availableAt, calibrationVersion: policy.calibration.version, games: gameTraces,
+    ...(adjustment.inputTrace && { league: adjustment.inputTrace }),
+  };
 
   let verifiedUsageGames = 0;
   let usableCoreGames = 0;
   let issue: RatingReason | null = null;
+  let componentIssue: ComponentRatingIssue | undefined;
   for (const stint of ordered) {
     const games = [...stint.games].sort((left, right) => compareId(left.gameId, right.gameId));
-    for (const { usage, stats } of games) {
+    for (const { gameId, usage, stats } of games) {
+      const observations: Readonly<Record<string, Observation | undefined>> = stats.observations;
+      gameTraces.push(traceGame(gameId, usage, fields, observations));
       if (usage.status === "UNKNOWN" || !isVerifiedSource(usage.source, origin)) {
         issue ??= "UNVERIFIED_USAGE";
         continue;
       }
       verifiedUsageGames++;
-      const observations: Readonly<Record<string, Observation | undefined>> = stats.observations;
       if (usage.status === "DID_NOT_PLAY") {
         if (fields.some((field) => {
           const observation = observations[field];
@@ -105,26 +128,37 @@ export function calculateFieldSeasonPerformance<P extends FieldPosition>(
         continue;
       }
       let completeCore = true;
-      for (const { definition, samples } of selected) {
+      for (const { definition, samples } of evaluated) {
         const observed = readComponent(definition, observations);
-        if (observed.status === "AVAILABLE") samples.push(observed.value);
+        if (observed.status === "AVAILABLE") {
+          if (samples) samples.push(observed.value);
+          else if (!issue) {
+            issue = "LIMITED_PATH_OPPORTUNITY_PRESENT";
+            componentIssue = { componentId: definition.id, gameId, exposure: observed.value.exposure };
+          }
+        }
         if (observed.status === "AVAILABLE" || observed.status === "NOT_APPLICABLE") continue;
         const core = tiers.CORE.some(({ id }) => id === definition.id);
         if (core) completeCore = false;
-        issue ??= !core ? "MISSING_COMPONENT"
-          : observed.status === "MISSING" ? "MISSING_CORE" : observed.status === "UNUSABLE" ? "UNUSABLE_CORE" : "INVALID_CORE";
+        if (!issue) {
+          issue = !core ? "MISSING_COMPONENT"
+            : observed.status === "MISSING" ? "MISSING_CORE" : observed.status === "UNUSABLE" ? "UNUSABLE_CORE" : "INVALID_CORE";
+          componentIssue = { componentId: definition.id, gameId, evidenceStatus: observed.status };
+        }
       }
       if (completeCore) usableCoreGames++;
     }
   }
   confidence = { ...confidence, verifiedUsageGames, usableCoreGames };
-  if (issue) return blocked(issue);
+  if (issue) return blocked(issue, componentIssue);
   const exposures: Record<string, number> = {};
   let latent = adjustment.value;
   for (const { definition, samples, parameter } of selected) {
     const total = samples.reduce((sum, { exposure }) => sum + exposure, 0);
-    if (total === 0) return blocked(tiers.CORE.some(({ id }) => id === definition.id) ? "MISSING_CORE" : "MISSING_COMPONENT");
     if (!Number.isSafeInteger(total)) return blocked("INVALID_MODEL_OUTPUT");
+    const minimumExposure = parameter.minimumExposure ?? 1;
+    if (total < minimumExposure) return blocked(total === 0 ? "NO_COMPONENT_EXPOSURE" : "INSUFFICIENT_COMPONENT_EXPOSURE",
+      { componentId: definition.id, exposure: total, minimumExposure });
     const value = samples.reduce((sum, sample) => sum + sample.value * (sample.exposure / total), 0);
     latent += parameter.weight * parameter.scale * (value - parameter.center);
     exposures[definition.id] = total;
@@ -132,7 +166,7 @@ export function calculateFieldSeasonPerformance<P extends FieldPosition>(
   const calibrated = calibrateSimulation(latent, policy.calibration);
   if (!calibrated) return blocked("INVALID_MODEL_OUTPUT");
   return {
-    ...base, confidence: { ...confidence, componentExposures: exposures }, leagueContextEvidenceIds: adjustment.evidenceIds,
+    ...base, inputTrace, confidence: { ...confidence, componentExposures: exposures }, leagueContextEvidenceIds: adjustment.evidenceIds,
     status: "PROVISIONAL", origin: "SYNTHETIC", label: "SIMULATION", ...calibrated,
   };
 }

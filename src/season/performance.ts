@@ -3,6 +3,8 @@ import { resolveLeagueAdjustment } from "../context/league-strength.ts";
 import type { LeagueStrengthEstimate } from "../context/league-strength.ts";
 import type { RatingReason, RatingResult } from "../contracts/rating.ts";
 import type { QbSeason } from "../contracts/statistics.ts";
+import { traceGame } from "../contracts/lineage.ts";
+import type { SeasonInputTrace } from "../contracts/lineage.ts";
 import { compareId, validateSeasonScope } from "./scope.ts";
 import { analyzeSyntheticQbGame } from "../models/qb/components.ts";
 import { scoreQbSeason, validQbPolicy } from "../models/qb/scoring.ts";
@@ -20,7 +22,10 @@ export function calculateSeasonPerformance(input: QbSeason, policy: QbSeasonSimu
   } as const;
   const expectedGames = stints.reduce((count, stint) => count + stint.expectedGameIds.length, 0);
   let confidence = summarizeConfidence(expectedGames);
-  const blocked = (reason: RatingReason): RatingResult => ({ ...base, confidence, status: "NOT_RATED", reason, score: null });
+  let inputTrace: SeasonInputTrace | undefined;
+  const blocked = (reason: RatingReason): RatingResult => ({
+    ...base, confidence, status: "NOT_RATED", reason, score: null, ...(inputTrace && { inputTrace }),
+  });
 
   if (origin !== "SYNTHETIC") return blocked("REAL_DATA_DISABLED");
   const scopeIssue = position === "QB" ? validateSeasonScope(input) : "INVALID_SCOPE";
@@ -29,9 +34,21 @@ export function calculateSeasonPerformance(input: QbSeason, policy: QbSeasonSimu
   const adjustment = resolveLeagueAdjustment(season.leagueId, position, asOf, policy.version, policy.leagueAdjustmentScale, context);
   if (!adjustment) return blocked("LEAGUE_CONTEXT_UNAVAILABLE");
 
-  const analyses = ordered.flatMap((stint) => [...stint.games]
-    .sort((left, right) => compareId(left.gameId, right.gameId))
-    .map((game) => analyzeSyntheticQbGame(game, policy.context)));
+  const games = ordered.flatMap((stint) => [...stint.games].sort((left, right) => compareId(left.gameId, right.gameId)));
+  inputTrace = {
+    snapshotAvailableAt: snapshot.availableAt, calibrationVersion: policy.calibration.version,
+    games: games.map(({ gameId, usage, stats }) => {
+      const observations = Object.fromEntries([
+        ...Object.entries(stats.passing).map(([field, value]) => [`passing.${field}`, value] as const),
+        ...Object.entries(stats.rushing).map(([field, value]) => [`rushing.${field}`, value] as const),
+        ...Object.entries(stats.situation).map(([field, value]) => [`situation.${field}`, value] as const),
+        ["advancedPassing.nonTouchdownFirstDowns", stats.advancedPassing?.nonTouchdownFirstDowns] as const,
+      ]);
+      return traceGame(gameId, usage, Object.keys(observations).sort(), observations);
+    }),
+    ...(adjustment.inputTrace && { league: adjustment.inputTrace }),
+  };
+  const analyses = games.map((game) => analyzeSyntheticQbGame(game, policy.context));
   confidence = summarizeConfidence(expectedGames, analyses.map(({ core }) => core));
   const coreIssue = analyses.find(({ core }) => core.status === "UNAVAILABLE")?.core;
   if (coreIssue?.status === "UNAVAILABLE") return blocked(coreIssue.reason);
@@ -46,7 +63,7 @@ export function calculateSeasonPerformance(input: QbSeason, policy: QbSeasonSimu
   const calibrated = calibrateSimulation(scored.value + adjustment.value, policy.calibration);
   if (!calibrated) return blocked("INVALID_MODEL_OUTPUT");
   return {
-    ...base, confidence, ...(policy.version.comparisonScope?.basis === "BRIDGE_REFERENCE"
+    ...base, inputTrace, confidence, ...(policy.version.comparisonScope?.basis === "BRIDGE_REFERENCE"
       ? { leagueContextEvidenceIds: adjustment.evidenceIds } : {}),
     status: "PROVISIONAL", origin: "SYNTHETIC", label: "SIMULATION", ...calibrated,
   };

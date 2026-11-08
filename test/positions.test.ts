@@ -183,7 +183,7 @@ test("SIMULATION | verified non-participation contributes no exposure and contra
 
 const request = {
   origin: "SYNTHETIC", position: "RB", leagueId: season.season.leagueId, referenceLeagueId: "sim-anchor",
-  version: "sim-league-context-1", asOf: season.asOf,
+  version: "sim-league-context-1", dataVersion: "sim-bridge-data-1", asOf: season.asOf,
 } as const satisfies LeagueContextRequest;
 const bridge = {
   id: "sim-bridge", kind: "TRANSFER", position: "RB", leagueId: request.leagueId, referenceLeagueId: request.referenceLeagueId,
@@ -198,6 +198,10 @@ test("SIMULATION | league context needs independent timely evidence, uses orient
   assert.equal(estimate.status, "AVAILABLE");
   assert.equal(estimate.adjustment, 3);
   assert.equal(estimate.simulationVariance, 2);
+  assert.deepEqual(estimate.inputTrace, {
+    dataVersion: request.dataVersion,
+    sources: [bridge.id, reverse.id].map((id) => ({ id, input: { status: "OBSERVED", sources: [source] } })),
+  });
   assert.deepEqual(estimate, estimateSyntheticLeagueStrength(request, [reverse, bridge]));
   assert.equal(estimateSyntheticLeagueStrength(request, [bridge, bridge]).status, "UNAVAILABLE");
   assert.equal(estimateSyntheticLeagueStrength(request, [{ ...bridge, availableAt: "2025-02-02T00:00:00.000Z" }]).status, "UNAVAILABLE");
@@ -213,6 +217,17 @@ test("SIMULATION | league context needs independent timely evidence, uses orient
   assert.equal(adjusted.kind, "SEASON_PERFORMANCE");
   assert.equal(adjusted.latent - baseline.latent, 1.5);
   assert.deepEqual(adjusted.leagueContextEvidenceIds, [bridge.id, reverse.id]);
+  assert.deepEqual(adjusted.inputTrace?.league, estimate.inputTrace);
+  const realSource = calculateFieldSeasonPerformance(input, contextual, {
+    ...estimate, inputTrace: {
+      ...estimate.inputTrace,
+      sources: estimate.inputTrace.sources.map(({ id, input: trace }) => ({
+        id, input: { ...trace, sources: [{ ...source, origin: "REAL", officiality: "OFFICIAL_SOURCE" }] },
+      })),
+    },
+  });
+  assert.equal(realSource.status, "NOT_RATED");
+  assert.equal(realSource.reason, "LEAGUE_CONTEXT_UNAVAILABLE");
   assert.equal(calculateFieldSeasonPerformance(input, contextual).status, "NOT_RATED");
   assert.equal(calculateFieldSeasonPerformance(input, model, estimate).status, "NOT_RATED");
 });

@@ -24,8 +24,10 @@ export function readComponent(
   if (observed.status === "INVALID" || expected?.status === "INVALID") return { status: "INVALID" };
   if (observed.status === "UNUSABLE" || expected?.status === "UNUSABLE") return { status: "UNUSABLE" };
   if (exposure === 0) {
-    return observed.status === "AVAILABLE" && observed.value !== 0
-      ? { status: "INVALID" } : { status: "NOT_APPLICABLE" };
+    if ((observed.status === "AVAILABLE" && observed.value !== 0)
+      || (expected?.status === "AVAILABLE" && expected.value !== 0)) return { status: "INVALID" };
+    if (observed.status === "MISSING" || expected?.status === "MISSING") return missing;
+    return { status: "NOT_APPLICABLE" };
   }
   if (observed.status !== "AVAILABLE" || (expected && expected.status !== "AVAILABLE")) return missing;
   const value = definition.direction * (observed.value - (expected?.value ?? 0)) / exposure;

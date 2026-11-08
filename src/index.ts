@@ -56,3 +56,9 @@ export type * from "./pilot/isolation.ts";
 export { validatePilotIsolation, withPilotConnection } from "./pilot/isolation.ts";
 export type * from "./pilot/monitoring.ts";
 export { PilotOperationError } from "./pilot/monitoring.ts";
+
+export type * from "./pilot/identity.ts";
+export { establishPilotSession, PilotPersonRegistry } from "./pilot/identity.ts";
+export { FilePilotSecretBroker } from "./pilot/file-broker.ts";
+export type { PilotAlert } from "./pilot/operations.ts";
+export { alertForPilotFailure, resumePilotRun } from "./pilot/operations.ts";

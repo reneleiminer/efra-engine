@@ -23,13 +23,16 @@
     "test:secure-pipeline": "node --test test/secure-pipeline.integration.ts",
     "test:coverage": "npm run typecheck && node --test --experimental-test-coverage --test-coverage-include=src/** test/*.test.ts",
     "build:pilot-engine": "node scripts/build-pilot-engine.mjs",
-    "pretest:secure-pipeline": "npm run build:pilot-engine"
+    "pretest:secure-pipeline": "npm run build:pilot-engine",
+    "pilot:verify": "node scripts/pilot/verify-infra.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
     "@types/pg": "8.23.1",
     "esbuild": "0.28.2",
-    "pg": "8.23.1",
     "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "pg": "8.23.1"
   }
 }

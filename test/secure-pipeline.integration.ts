@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import type { KeyObject } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { after, before, test } from "node:test";
 import { Pool } from "pg";
 import type { PoolClient } from "pg";
@@ -22,28 +23,41 @@ import { gameObservations } from "../src/models/positions/metric-registry.ts";
 import type { SourceCapability } from "../src/models/positions/data-requirements.ts";
 import { advancedPolicy, game, policy, season, source } from "./simulation-fixtures.ts";
 
+const compose = process.env["EFRA_PILOT_COMPOSE"] === "1";
 const hosted = process.env["EFRA_NEON_TEST_DATABASE_URL"];
-const connectionString = hosted ?? process.env["EFRA_TEST_DATABASE_URL"];
+if (compose && hosted) throw new Error("Synthetic Compose cannot use a hosted database");
+const composeCa = compose ? await readFile("/run/pilot-controller/ca.crt", "utf8") : undefined;
+async function composeUrl(instance: "canonical" | "vault") {
+  const endpoint = new URL(`postgresql://efra_test@${instance}:5432/efra_pilot_${instance}`);
+  endpoint.password = (await readFile("/run/pilot-controller/" + instance + ".password", "utf8")).trim();
+  if (!/^[a-f0-9]{64}$/.test(endpoint.password)) throw new Error("Invalid generated test secret");
+  return endpoint.toString();
+}
+function fixturePool(endpoint: string, max?: number) {
+  return new Pool({ connectionString: endpoint, connectionTimeoutMillis: 15_000, max,
+    ...(composeCa && { ssl: { ca: composeCa, rejectUnauthorized: true } }) });
+}
+const connectionString = compose ? await composeUrl("canonical") : hosted ?? process.env["EFRA_TEST_DATABASE_URL"];
 if (!connectionString) throw new Error("An isolated EFRA integration database is required");
 const url = new URL(connectionString);
 const branchId = process.env["EFRA_NEON_TEST_BRANCH_ID"];
 const primaryBranchId = process.env["EFRA_NEON_PRIMARY_BRANCH_ID"];
-const target: MigrationTestTarget = hosted
+const target: MigrationTestTarget = compose ? { kind: "COMPOSE_TEST", instance: "canonical" } : hosted
   ? { kind: "NEON_TEST", branchId: branchId ?? "", primaryBranchId: primaryBranchId ?? "" } : { kind: "LOCAL_TEST" };
 if (hosted) {
   if (url.protocol !== "postgresql:" || !url.hostname.endsWith(".neon.tech") || url.hostname.includes("-pooler")
     || url.pathname !== "/efra" || !branchId || !primaryBranchId || branchId === primaryBranchId
     || url.searchParams.get("sslmode") !== "verify-full") throw new Error("Expected the isolated direct Neon endpoint");
-} else if (url.protocol !== "postgresql:" || url.hostname !== "127.0.0.1" || url.pathname !== "/efra_stage_test"
-  || url.username !== "efra_test" || !url.port || url.search || url.hash) throw new Error("Expected the local test database");
+} else if (!compose && (url.protocol !== "postgresql:" || url.hostname !== "127.0.0.1" || url.pathname !== "/efra_stage_test"
+  || url.username !== "efra_test" || !url.port || url.search || url.hash)) throw new Error("Expected the local test database");
 
-const admin = new Pool({ connectionString, connectionTimeoutMillis: 15_000 });
-const isolatedVaultUrl = process.env["EFRA_PILOT_VAULT_DATABASE_URL"];
+const admin = fixturePool(connectionString);
+const isolatedVaultUrl = compose ? await composeUrl("vault") : process.env["EFRA_PILOT_VAULT_DATABASE_URL"];
 const vaultUrl = isolatedVaultUrl ? new URL(isolatedVaultUrl) : undefined;
-if (vaultUrl && (hosted || vaultUrl.protocol !== "postgresql:" || vaultUrl.hostname !== "127.0.0.1"
+if (vaultUrl && !compose && (hosted || vaultUrl.protocol !== "postgresql:" || vaultUrl.hostname !== "127.0.0.1"
   || vaultUrl.pathname !== "/efra_stage_test" || vaultUrl.username !== "efra_test" || !vaultUrl.port
   || vaultUrl.port === url.port || vaultUrl.search || vaultUrl.hash)) throw new Error("Expected a second local test PostgreSQL instance");
-const vaultAdmin = vaultUrl ? new Pool({ connectionString: vaultUrl.toString(), connectionTimeoutMillis: 15_000 }) : undefined;
+const vaultAdmin = vaultUrl ? fixturePool(vaultUrl.toString()) : undefined;
 const actors = {
   importer: { capability: "IMPORTER", group: "importer", active: true },
   reviewer: { capability: "REVIEWER", group: "reviewer", active: true },
@@ -67,12 +81,14 @@ const actorPool = (actor: Actor) => {
 };
 const service = (actor: Actor) => new PostgresSecurePipeline(actorPool(actor));
 let migrations: readonly MigrationFile[] = [];
+let vaultWorkerPassword: string | undefined;
 
 async function configureValidationActors(client: PoolClient, endpoint: URL, destination: Map<Actor, Pool>, canonical: boolean) {
   for (const key of Object.keys(validationActors) as (keyof typeof validationActors)[]) {
     const group = validationActors[key];
     const login = canonical ? `efra_p13_${key}` : `efra_vault_p13_${key}`;
     const password = randomBytes(32).toString("hex");
+    if (compose && !canonical && key === "worker") vaultWorkerPassword = password;
     await client.query(`CREATE ROLE ${login} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '${password}'`);
     await client.query(`GRANT efra_validation_${group} TO ${login} WITH INHERIT TRUE, SET FALSE`);
     await client.query(`INSERT INTO efra_validation.principal (login, login_oid, subject, capability)
@@ -85,7 +101,7 @@ async function configureValidationActors(client: PoolClient, endpoint: URL, dest
     const account = new URL(endpoint);
     account.username = login;
     account.password = password;
-    destination.set(key, new Pool({ connectionString: account.toString(), max: 4, connectionTimeoutMillis: 15_000 }));
+    destination.set(key, fixturePool(account.toString(), 4));
   }
 }
 
@@ -104,7 +120,7 @@ before(async () => {
     assert.equal(empty?.safe, true);
   } else {
     assert.equal(server.branch, null);
-    assert.equal(server.database, "efra_stage_test");
+    assert.equal(server.database, compose ? "efra_pilot_canonical" : "efra_stage_test");
     assert.equal(server.login, "efra_test");
     await admin.query(await readFile(new URL("fixtures/efra-schema.sql", import.meta.url), "utf8"));
   }
@@ -130,7 +146,7 @@ before(async () => {
       const account = new URL(url);
       account.username = login;
       account.password = password;
-      pools.set(key, new Pool({ connectionString: account.toString(), max: 4, connectionTimeoutMillis: 15_000 }));
+      pools.set(key, fixturePool(account.toString(), 4));
     }
     await configureValidationActors(client, url, pools, true);
     await client.query("COMMIT");
@@ -143,12 +159,20 @@ before(async () => {
   }
   if (vaultAdmin && vaultUrl) {
     const { rows: [server] } = await vaultAdmin.query<{ safe: boolean }>(
-      "SELECT to_regnamespace('efra') IS NULL AND current_database() = 'efra_stage_test' AND session_user = 'efra_test'"
+      "SELECT to_regnamespace('efra') IS NULL AND current_database() = $1 AND session_user = 'efra_test'"
       + " AND nullif(current_setting('neon.branch_id', true),'') IS NULL AS safe",
+      [compose ? "efra_pilot_vault" : "efra_stage_test"],
     );
     assert.ok(server?.safe);
+    if (compose) {
+      const query = "SELECT system_identifier::text AS id FROM pg_control_system()";
+      const canonicalCluster = await admin.query<{ id: string }>(query);
+      const vaultCluster = await vaultAdmin.query<{ id: string }>(query);
+      assert.ok(canonicalCluster.rows[0]?.id && vaultCluster.rows[0]?.id);
+      assert.notEqual(canonicalCluster.rows[0]?.id, vaultCluster.rows[0]?.id);
+    }
     await vaultAdmin.query(await readFile(new URL("fixtures/efra-schema.sql", import.meta.url), "utf8"));
-    await applyIngestTestMigrations(vaultAdmin, { kind: "LOCAL_TEST" }, migrations);
+    await applyIngestTestMigrations(vaultAdmin, compose ? { kind: "COMPOSE_TEST", instance: "vault" } : { kind: "LOCAL_TEST" }, migrations);
     const vaultClient = await vaultAdmin.connect();
     try { await configureValidationActors(vaultClient, vaultUrl, vaultPools, false); }
     finally { vaultClient.release(); }
@@ -872,7 +896,7 @@ test("SIMULATION | pilot locks the measured bundle and signed report across a co
   const body: PilotRunManifest = {
     version: "efra-pilot-run-v1", mode: "SYNTHETIC_ONLY", datasetId: dataset, runId, datasetSha256,
     engineSha256: engine, modelSha256, configurationSha256: sha256Bytes(artifacts.configuration), reportKeyId: "REPORT",
-    issuedAt: new Date(now - 10).toISOString(), expiresAt: new Date(now + 60_000).toISOString(),
+    issuedAt: new Date(now - 10).toISOString(), expiresAt: new Date(now + 300_000).toISOString(),
   };
   const authorization = await signPilot(environment, "RUN", body, signer("RUN"));
   const db = pilotPool("worker");
@@ -910,6 +934,46 @@ test("SIMULATION | pilot locks the measured bundle and signed report across a co
     result: { label: "SIMULATION", officialEligible: false, empiricalValidation: false } };
   await assert.rejects(db.query("SELECT efra_validation.record_report($1,$2,$3::jsonb)", [dataset, runId, unsigned]), { code: "23514" });
 
+  const writeJobFile = async (directory: "inbox" | "keys" | "leases" | "trust", name: string, value: string) => {
+    const path = "/run/pilot-" + directory + "/" + name;
+    await writeFile(path + ".tmp", value, { mode: 0o600, flag: "wx" });
+    await rename(path + ".tmp", path);
+  };
+  const publicKeys = Object.fromEntries(purposes.map((purpose) => [purpose, {
+    purpose, pem: keys.get(purpose)!.publicKey.export({ format: "pem", type: "spki" }).toString(),
+  }]));
+  const executeContainer = async (sequence: number, password: string, signedRun = authorization) => {
+    const version = "lease-" + sequence;
+    await writeJobFile("leases", "worker-lease.json", JSON.stringify({ reference: "worker-lease", service: "holdout-worker",
+      environment, version, login: "efra_vault_p13_worker", password, expiresAt: Date.now() + 300_000 }));
+    await writeJobFile("inbox", "job-" + sequence + ".json", JSON.stringify({
+      version: "efra-local-pilot-job-v1", engine: engineManifest, run: signedRun,
+      model: artifacts.model.toString("base64"), configuration: artifacts.configuration.toString("base64"),
+    }));
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      try {
+        const receipt = JSON.parse(await readFile("/run/pilot-outbox/receipt-" + sequence + ".json", "utf8"));
+        assert.deepEqual(receipt, { label: "SIMULATION", officialEligible: false, datasetSha256, runId, leaseVersion: version });
+        return;
+      } catch (error) {
+        if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) throw error;
+        await delay(100);
+      }
+    }
+    throw new Error("Isolated worker did not return its verified receipt");
+  };
+  if (compose) {
+    assert.ok(vaultWorkerPassword && vaultUrl && vaultAdmin && composeCa);
+    const insecure = new Pool({ connectionString: vaultUrl.toString(), ssl: false, connectionTimeoutMillis: 5_000 });
+    try { await assert.rejects(insecure.query("SELECT 1"), { code: "28000" }); }
+    finally { await insecure.end(); }
+    await writeJobFile("trust", "ca.crt", composeCa);
+    await writeJobFile("trust", "public-keys.json", JSON.stringify(publicKeys));
+    await writeJobFile("keys", "report.key", keys.get("REPORT")!.privateKey.export({ format: "pem", type: "pkcs8" }).toString());
+    await executeContainer(1, vaultWorkerPassword);
+  }
+
   let lost = false;
   const interrupted = { query: async (sql: string, values: unknown[]) => {
     const result = await db.query(sql, values);
@@ -922,10 +986,9 @@ test("SIMULATION | pilot locks the measured bundle and signed report across a co
   const faultyWorker = await createVerifiedPilotWorker({ ...options, db: interrupted });
   await assert.rejects(faultyWorker.evaluate(dataset, runId, authorization, artifacts), { failure: "TRANSIENT_STORAGE" });
   assert.ok(lost);
-  const receipts = await Promise.all([
-    worker.evaluate(dataset, runId, authorization, artifacts), worker.evaluate(dataset, runId, authorization, artifacts),
-  ]);
-  assert.deepEqual(receipts, Array(2).fill({ label: "SIMULATION", officialEligible: false, datasetSha256 }));
+  const concurrency = compose ? 12 : 2;
+  const receipts = await Promise.all(Array.from({ length: concurrency }, () => worker.evaluate(dataset, runId, authorization, artifacts)));
+  assert.deepEqual(receipts, Array(concurrency).fill({ label: "SIMULATION", officialEligible: false, datasetSha256 }));
   const ticket = await approver.requestPrivateReport(dataset);
   const recipient = "sim-validation-approver";
   await assert.rejects(new PostgresValidationWorker(db, engine).readPrivateReport(ticket, recipient), { code: "42501" });
@@ -937,6 +1000,31 @@ test("SIMULATION | pilot locks the measured bundle and signed report across a co
   assert.throws(() => verifyPilotReport(environment, { ...report, bridgeExclusions: [{ id: "changed", partition: "test", issues: [] }] },
     authorization, trust), /does not match/);
   assert.throws(() => verifyPilotReport(environment, report, otherRun, trust), /does not match/);
+  if (compose) {
+    assert.ok(vaultWorkerPassword && vaultUrl && vaultAdmin);
+    const rotated = randomBytes(32).toString("hex");
+    await vaultAdmin.query(`ALTER ROLE efra_vault_p13_worker PASSWORD '${rotated}'`);
+    const oldEndpoint = new URL(vaultUrl);
+    oldEndpoint.username = "efra_vault_p13_worker";
+    oldEndpoint.password = vaultWorkerPassword;
+    const obsolete = fixturePool(oldEndpoint.toString());
+    try { await assert.rejects(obsolete.query("SELECT 1"), { code: "28P01" }); }
+    finally { await obsolete.end(); }
+    const next = generateKeyPairSync("ed25519");
+    const nextAuthorization = await signPilot(environment, "RUN", body, {
+      keyId: "RUN-next", sign: async (message) => sign(null, message, next.privateKey),
+    });
+    await writeJobFile("trust", "public-keys.json", JSON.stringify({
+      ENGINE: publicKeys.ENGINE, REPORT: publicKeys.REPORT,
+      "RUN-next": { purpose: "RUN", pem: next.publicKey.export({ format: "pem", type: "spki" }).toString() },
+    }));
+    await executeContainer(2, rotated, nextAuthorization);
+    await writeJobFile("inbox", "job-3.json", JSON.stringify({
+      version: "efra-local-pilot-job-v1", engine: engineManifest,
+      run: { ...nextAuthorization, body: { ...body, configurationSha256: "0".repeat(64) } },
+      model: artifacts.model.toString("base64"), configuration: artifacts.configuration.toString("base64"),
+    }));
+  }
   keys.delete("RUN");
   await assert.rejects(worker.evaluate(dataset, runId, authorization, artifacts), { failure: "INTEGRITY_OR_EXECUTION" });
   keys.delete("REPORT");

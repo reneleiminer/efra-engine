@@ -1,1 +1,2 @@
 db/migrations/*.sql text eol=lf
+infra/pilot/*.sh text eol=lf

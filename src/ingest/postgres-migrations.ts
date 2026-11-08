@@ -8,6 +8,7 @@ export interface MigrationFile {
 
 export type MigrationTestTarget =
   | { readonly kind: "LOCAL_TEST" }
+  | { readonly kind: "COMPOSE_TEST"; readonly instance: "canonical" | "vault" }
   | { readonly kind: "NEON_TEST"; readonly branchId: string; readonly primaryBranchId: string };
 
 /** Applies a verified ordered prefix, and rejects any unjournaled pre-existing staging installation. */
@@ -27,12 +28,18 @@ export async function applyIngestTestMigrations(
   let discard = false;
   try {
     await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
-    const { rows: [database] } = await client.query<{ name: string; login: string; branch: string | null }>(
-      "SELECT current_database() AS name, session_user AS login, nullif(current_setting('neon.branch_id', true), '') AS branch",
+    const { rows: [database] } = await client.query<{
+      name: string; login: string; branch: string | null; instance: string | null; tls: boolean;
+    }>(
+      `SELECT current_database() AS name, session_user AS login, nullif(current_setting('neon.branch_id', true), '') AS branch,
+        current_setting('efra.synthetic_pilot', true) AS instance,
+        coalesce((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false) AS tls`,
     );
     if (!database || (target.kind === "LOCAL_TEST"
       ? database.name !== "efra_stage_test" || database.login !== "efra_test" || database.branch !== null
-      : database.name !== "efra" || database.branch !== target.branchId)) {
+      : target.kind === "COMPOSE_TEST" ? database.name !== "efra_pilot_" + target.instance
+        || database.instance !== target.instance || database.login !== "efra_test" || database.branch !== null || !database.tls
+        : database.name !== "efra" || database.branch !== target.branchId)) {
       throw new Error("Migration target is not the expected isolated test database");
     }
     await client.query("SELECT pg_advisory_xact_lock(716184, 0)");

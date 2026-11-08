@@ -1,0 +1,16 @@
+**
+!package.json
+!package-lock.json
+!tsconfig*.json
+!src/
+!src/**
+!scripts/
+!scripts/**
+!db/
+!db/migrations/
+!db/migrations/**
+!test/
+!test/**
+!infra/
+!infra/pilot/
+!infra/pilot/Dockerfile

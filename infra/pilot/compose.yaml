@@ -1,0 +1,128 @@
+# Synthetic local profile. Started through npm run pilot:verify with a unique project name.
+x-postgres-image: &postgres-image postgres:18@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+x-db: &db
+  image: *postgres-image
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/var/run/postgresql, /tmp]
+  healthcheck:
+    test: [CMD-SHELL, 'pg_isready -q -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+    interval: 2s
+    timeout: 3s
+    retries: 30
+x-app: &app
+  user: "1000:1000"
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp]
+  pids_limit: 100
+  working_dir: /app
+services:
+  setup:
+    image: *postgres-image
+    network_mode: none
+    entrypoint: [sh, /setup.sh]
+    volumes:
+      - ./setup.sh:/setup.sh:ro
+      - canonical-secrets:/canonical
+      - vault-secrets:/vault
+      - controller-secrets:/control
+      - inbox:/inbox
+      - outbox:/outbox
+      - worker-trust:/trust
+      - worker-keys:/keys
+      - worker-leases:/leases
+  canonical:
+    <<: *db
+    command: [postgres, -c, ssl=on, -c, ssl_cert_file=/pilot/server.crt, -c, ssl_key_file=/pilot/server.key, -c, hba_file=/pilot/pg_hba.conf, -c, log_min_error_statement=panic, -c, efra.synthetic_pilot=canonical]
+    environment:
+      POSTGRES_USER: efra_test
+      POSTGRES_DB: efra_pilot_canonical
+      POSTGRES_PASSWORD_FILE: /pilot/password
+    networks: [canonical]
+    volumes:
+      - canonical-data:/var/lib/postgresql
+      - canonical-secrets:/pilot:ro
+  vault:
+    <<: *db
+    command: [postgres, -c, ssl=on, -c, ssl_cert_file=/pilot/server.crt, -c, ssl_key_file=/pilot/server.key, -c, hba_file=/pilot/pg_hba.conf, -c, log_min_error_statement=panic, -c, efra.synthetic_pilot=vault]
+    environment:
+      POSTGRES_USER: efra_test
+      POSTGRES_DB: efra_pilot_vault
+      POSTGRES_PASSWORD_FILE: /pilot/password
+    networks: [vault]
+    volumes:
+      - vault-data:/var/lib/postgresql
+      - vault-secrets:/pilot:ro
+  controller:
+    <<: *app
+    build:
+      context: ../..
+      dockerfile: infra/pilot/Dockerfile
+      target: tooling
+    command: [node, --test, test/secure-pipeline.integration.ts]
+    environment:
+      EFRA_PILOT_COMPOSE: "1"
+    networks: [canonical, vault]
+    volumes:
+      - controller-secrets:/run/pilot-controller:ro
+      - inbox:/run/pilot-inbox
+      - outbox:/run/pilot-outbox:ro
+      - worker-trust:/run/pilot-trust
+      - worker-keys:/run/pilot-keys
+      - worker-leases:/run/pilot-leases
+  worker:
+    <<: *app
+    mem_limit: 256m
+    cpus: 1
+    build:
+      context: ../..
+      dockerfile: infra/pilot/Dockerfile
+      target: runtime
+    command: [node, scripts/pilot/run-worker.mjs]
+    networks: [vault]
+    volumes:
+      - inbox:/run/pilot-inbox:ro
+      - outbox:/run/pilot-outbox
+      - worker-trust:/run/pilot-trust:ro
+      - worker-keys:/run/pilot-keys:ro
+      - worker-leases:/run/pilot-leases:ro
+  restore-canonical:
+    <<: *db
+    profiles: [restore]
+    network_mode: none
+    environment:
+      POSTGRES_USER: efra_test
+      POSTGRES_DB: efra_pilot_canonical
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - restore-canonical-data:/var/lib/postgresql
+  restore-vault:
+    <<: *db
+    profiles: [restore]
+    network_mode: none
+    environment:
+      POSTGRES_USER: efra_test
+      POSTGRES_DB: efra_pilot_vault
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - restore-vault-data:/var/lib/postgresql
+networks:
+  canonical:
+    internal: true
+  vault:
+    internal: true
+volumes:
+  canonical-data:
+  vault-data:
+  restore-canonical-data:
+  restore-vault-data:
+  canonical-secrets:
+  vault-secrets:
+  controller-secrets:
+  inbox:
+  outbox:
+  worker-trust:
+  worker-keys:
+  worker-leases:

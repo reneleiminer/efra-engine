@@ -164,6 +164,21 @@ test("SIMULATION | one provider identity cannot resolve to different players or 
   }
 });
 
+test("SIMULATION | asynchronous fixture ports cannot change the inputs bound to the revision", async () => {
+  const mutable = mapping(epfrRequest);
+  const clean = await inspectSourceFixture(epfrRequest, mutable, { readFixture: async () => fixture(epfrRequest) }, resolver);
+  const inspected = await inspectSourceFixture(epfrRequest, mutable, { readFixture: async (asked) => {
+    Reflect.set(asked, "gameKey", "sim-other-game");
+    Reflect.set(mutable.bindings[0]!, "field", "passing.interceptions");
+    return fixture(epfrRequest);
+  } }, { resolve: async (...args) => {
+    const result = await resolver.resolve(...args);
+    Reflect.set(args[2], "playerKey", "sim-other-player");
+    return result;
+  } });
+  assert.deepEqual(inspected, clean);
+});
+
 const clipDigest = "b".repeat(64);
 const annotation: FilmAnnotation = {
   version: filmLabContractVersion, origin: "SYNTHETIC", protocolVersion: "sim-protocol-1",

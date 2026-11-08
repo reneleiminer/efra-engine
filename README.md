@@ -66,3 +66,5 @@ Die [Sicherheitsgrundlage für den synthetischen Pilotbetrieb](docs/pilot-securi
 Das [lokale synthetische Pilotprofil](docs/secure-pilot-infrastructure.md) startet mit `npm run pilot:verify`. Die Abnahme prüft isolierte PostgreSQL-Instanzen, Worker, Rotation, Alarmierung und den Backup- und Restore-Pfad.
 
 Der [Quellenreifebericht](docs/source-readiness-2026.md) und die [maschinenlesbare Evidenzmatrix](docs/evidence-coverage-v1.json) erfassen öffentliche Feldkandidaten, API-Prüfstatus, Rechte und fehlende Nachweise für alle Positionsmodelle. Die versionierten Quellenports und das Film-Lab-Vertragsmodell sind für synthetische Prüfungen vorgesehen.
+
+Das [Statistical Performance System 2026](docs/statistical-performance-2026.md) erzeugt aus geprüften QB-Eingaben liga- und phasenspezifische Bestenlisten und Spielerberichte. Es enthält außerdem die Honors-Grundlage und einen gesperrten, versionierten Leseexport für eine spätere Website-Anbindung. Die 24-Positions-Rating-Engine und ihre empirischen Freigabekriterien gelten unabhängig davon.

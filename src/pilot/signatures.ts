@@ -2,7 +2,8 @@ import { createHash, createPublicKey, verify } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 import { canonicalJson } from "../ingest/determinism.ts";
 
-export type PilotKeyPurpose = "ENGINE" | "RUN" | "REPORT" | "ACTION";
+export type PilotKeyPurpose = "ENGINE" | "RUN" | "REPORT" | "ACTION"
+  | "STAT_DATA" | "STAT_POLICY" | "STAT_RIGHTS" | "STAT_PUBLICATION" | "STAT_HONORS_PROPOSAL" | "STAT_HONORS_REVIEW";
 
 export interface PilotKeyTrust {
   /** Lookup the current public key for this purpose and pilot environment. Revoked keys must be absent. */

@@ -69,3 +69,12 @@ export type * from "./source-readiness/adapters.ts";
 export { inspectSourceFixture, sourceAdapterVersion, statsNScoreDocumentedOperations } from "./source-readiness/adapters.ts";
 export type * from "./source-readiness/film-lab.ts";
 export { assessFilmAnnotation, filmLabContractVersion } from "./source-readiness/film-lab.ts";
+
+export * from "./statistical-performance/contracts.ts";
+export { normalizeEpfrQbFixture, normalizeStatsNScoreQbFixture } from "./statistical-performance/fixtures.ts";
+export { calculateStatisticalSeason, compareQbStatisticalReports } from "./statistical-performance/performance.ts";
+export type { Measure } from "./statistical-performance/performance.ts";
+export { honorsCategories, reviewPassingHonors } from "./statistical-performance/honors.ts";
+export type * from "./statistical-performance/honors.ts";
+export { statisticalReadVersion, exportStatisticalReadModel } from "./statistical-performance/export.ts";
+export type * from "./statistical-performance/export.ts";

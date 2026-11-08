@@ -5,6 +5,7 @@ import type { FieldPosition, FieldStatistics } from "../models/positions/catalog
 export interface ImportManifest {
   readonly sourceId: string;
   readonly sourceRevision: string;
+  readonly supersedesSourceRevision?: string;
   readonly origin: DataOrigin;
   readonly competitionId: string;
   readonly seasonId: string;
@@ -50,7 +51,7 @@ export type ImportPlan =
       readonly rows: readonly ImportRowDecision[];
     };
 
-/** Reserved for an isolated staging adapter. Persistence must be atomic and replay-safe. */
+/** Persistence must be atomic and replay-safe. */
 export interface ImportStageStore {
   stage(plan: Extract<ImportPlan, { status: "DRY_RUN" }>): Promise<"STAGED" | "ALREADY_STAGED" | "REVISION_CONFLICT">;
 }

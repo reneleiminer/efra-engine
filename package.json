@@ -6,6 +6,7 @@
   "engines": { "node": ">=24" },
   "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
   "scripts": {
+    "matrix": "node scripts/position-matrix.mjs",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json",
     "test": "npm run typecheck && node --test test/*.test.ts",

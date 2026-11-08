@@ -37,10 +37,11 @@ export interface PilotPersonPolicy {
     readonly subject: string;
     readonly personId: string;
     readonly active: boolean;
-    readonly role: "IMPORT_REVIEWER" | "HOLDOUT_APPROVER";
+    readonly role: PilotPersonRole;
     readonly resourceIds: readonly string[];
   }[];
 }
+type PilotPersonRole = "IMPORT_REVIEWER" | "HOLDOUT_APPROVER" | "STATISTICAL_REVIEWER" | "STATISTICAL_PUBLISHER";
 
 /** A workload-owned policy source, re-read on each decision so grants can be withdrawn. */
 export class PilotPersonRegistry {
@@ -59,7 +60,7 @@ export class PilotPersonRegistry {
       && new Set(policy.people.map((person) => JSON.stringify([person.issuer, person.subject]))).size === policy.people.length
       && new Set(policy.people.map(({ personId }) => personId)).size === policy.people.length
       && policy.people.every((person) => person.issuer.startsWith("https://") && person.subject.trim() && isPilotId(person.personId)
-        && typeof person.active === "boolean" && ["IMPORT_REVIEWER", "HOLDOUT_APPROVER"].includes(person.role)
+        && typeof person.active === "boolean" && ["IMPORT_REVIEWER", "HOLDOUT_APPROVER", "STATISTICAL_REVIEWER", "STATISTICAL_PUBLISHER"].includes(person.role)
         && person.resourceIds.every(isPilotId) && new Set(person.resourceIds).size === person.resourceIds.length),
     "Invalid pilot person policy");
     return policy.people.find((person) => person.issuer === issuer && person.subject === subject);
@@ -72,8 +73,10 @@ export class PilotPersonRegistry {
 
   async allows(session: PilotSession, command: PilotActionCommand) {
     const person = await this.#person(session.issuer, session.subject);
-    const roles: Record<PilotActionCommand["action"], "IMPORT_REVIEWER" | "HOLDOUT_APPROVER"> = {
+    const roles: Record<PilotActionCommand["action"], PilotPersonRole> = {
       REVIEW_IMPORT: "IMPORT_REVIEWER", APPROVE_HOLDOUT: "HOLDOUT_APPROVER", REQUEST_PRIVATE_REPORT: "HOLDOUT_APPROVER",
+      REVIEW_EFA_STATISTICS: "STATISTICAL_REVIEWER", PUBLISH_EFA_STATISTICS: "STATISTICAL_PUBLISHER",
+      REVOKE_EFA_STATISTICS: "STATISTICAL_PUBLISHER",
     };
     return session.environment === this.#environment && !!person?.active && person.personId === session.personId
       && person.role === roles[command.action] && person.resourceIds.includes(command.resourceId);

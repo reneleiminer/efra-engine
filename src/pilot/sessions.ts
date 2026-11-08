@@ -3,10 +3,18 @@ import { canonicalSha256 } from "../ingest/determinism.ts";
 import { isDigest, isPilotId, isUuid, requirePilot, sha256Bytes, signPilot, verifyPilot } from "./signatures.ts";
 import type { PilotKeyTrust, PilotSigner, SignedPilotEnvelope } from "./signatures.ts";
 
-export type PilotAction = "REVIEW_IMPORT" | "APPROVE_HOLDOUT" | "REQUEST_PRIVATE_REPORT";
+export type StatisticalPilotAction = "REVIEW_EFA_STATISTICS" | "PUBLISH_EFA_STATISTICS" | "REVOKE_EFA_STATISTICS";
+export type PilotAction = "REVIEW_IMPORT" | "APPROVE_HOLDOUT" | "REQUEST_PRIVATE_REPORT" | StatisticalPilotAction;
+export interface StatisticalPilotActionPayload {
+  readonly targetSha256: string;
+  readonly expectedHead: string | null;
+  readonly reason: string;
+  readonly releaseSha256?: string;
+}
 export type PilotActionPayload =
   | { readonly decision: "APPROVED" | "REJECTED"; readonly reason: string }
   | { readonly datasetSha256: string; readonly reason: string }
+  | StatisticalPilotActionPayload
   | Readonly<Record<string, never>>;
 export interface PilotActionCommand {
   readonly action: PilotAction;
@@ -56,7 +64,8 @@ export interface PilotActionBoundary {
   readonly now?: () => number;
 }
 
-const actions = ["REVIEW_IMPORT", "APPROVE_HOLDOUT", "REQUEST_PRIVATE_REPORT"] as const;
+const actions = ["REVIEW_IMPORT", "APPROVE_HOLDOUT", "REQUEST_PRIVATE_REPORT",
+  "REVIEW_EFA_STATISTICS", "PUBLISH_EFA_STATISTICS", "REVOKE_EFA_STATISTICS"] as const;
 const maximumDelegationMs = 60_000;
 const maximumFreshAuthenticationMs = 5 * 60_000;
 
@@ -73,6 +82,18 @@ function checkedPayload(action: PilotAction, payload: unknown): PilotActionPaylo
   if (action === "REQUEST_PRIVATE_REPORT") {
     requirePilot(keys.length === 0, "Private report request has no payload");
     return {};
+  }
+  if (action === "REVIEW_EFA_STATISTICS" || action === "PUBLISH_EFA_STATISTICS" || action === "REVOKE_EFA_STATISTICS") {
+    requirePilot(keys.length === (action === "PUBLISH_EFA_STATISTICS" ? 4 : 3) && "targetSha256" in payload && isDigest(payload.targetSha256)
+      && "expectedHead" in payload && (payload.expectedHead === null || isUuid(payload.expectedHead))
+      && "reason" in payload && typeof payload.reason === "string" && payload.reason.trim() && payload.reason.length <= 1000,
+    "Invalid EFA statistical action");
+    if (action === "PUBLISH_EFA_STATISTICS") {
+      requirePilot("releaseSha256" in payload && isDigest(payload.releaseSha256), "EFA action requires the exact release digest");
+      return { targetSha256: payload.targetSha256, expectedHead: payload.expectedHead, reason: payload.reason,
+        releaseSha256: payload.releaseSha256 };
+    }
+    return { targetSha256: payload.targetSha256, expectedHead: payload.expectedHead, reason: payload.reason };
   }
   requirePilot(keys.length === 2 && Object.hasOwn(payload, "reason") && "reason" in payload
     && typeof payload.reason === "string" && payload.reason.trim().length > 0 && payload.reason.length <= 1_000, "Invalid pilot action reason");

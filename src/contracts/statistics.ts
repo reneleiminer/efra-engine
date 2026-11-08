@@ -68,6 +68,7 @@ export interface QbStatistics {
   };
   /** Situational sacks attributed to the QB and excluded from both passing and rushing attempts. */
   readonly situationDefinitionVersion?: string;
+  readonly situationLeagueStrengthExcluded?: true;
 }
 
 export type QbGame = GameStatistics<"QB", QbStatistics>;

@@ -12,6 +12,8 @@ export interface PassingContextInput {
 
 export interface PassingContextModel {
   readonly version: string;
+  /** Explicit declaration for policies that apply a separate league bridge after aggregation. */
+  readonly leagueStrengthExcluded?: true;
   readonly expectedTouchdowns: (input: PassingContextInput) => number | null;
   readonly nonTouchdownFirstDowns?: {
     readonly definitionVersion: string;

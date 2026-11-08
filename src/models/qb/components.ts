@@ -41,6 +41,7 @@ export interface QbGameAnalysis {
   readonly gameId: string;
   readonly contextVersion: string | null;
   readonly situationDefinitionVersion: string | null;
+  readonly situationLeagueStrengthExcluded: boolean;
   readonly core: CoreAssessment;
   readonly components: QbComponents;
 }
@@ -50,6 +51,7 @@ export function analyzeSyntheticQbGame(game: QbGame, context?: PassingContextMod
   const provenance = {
     label: "SIMULATION", gameId: game.gameId, contextVersion: context?.version ?? null,
     situationDefinitionVersion: game.stats.situationDefinitionVersion ?? null,
+    situationLeagueStrengthExcluded: game.stats.situationLeagueStrengthExcluded === true,
   } as const;
   if (core.status !== "PASSING") {
     const status = core.status === "UNAVAILABLE" ? "UNUSABLE" : "NOT_APPLICABLE";

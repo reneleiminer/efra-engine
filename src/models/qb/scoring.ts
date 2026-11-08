@@ -24,6 +24,7 @@ type Simulation<P extends QbPath, C> = {
   readonly version: ModelVersion & { readonly path: P };
   readonly components: C;
   readonly calibration: SimulationCalibration;
+  readonly leagueAdjustmentScale?: number;
 };
 
 export type QbSeasonSimulation =
@@ -35,14 +36,17 @@ export function validQbPolicy(policy: QbSeasonSimulation): boolean {
   const { version, components, context } = policy;
   if (version.maturity !== "UNVALIDATED_SIMULATION"
     || [version.methodVersion, version.parameterVersion, version.contextVersion].some((id) => !id.trim())) return false;
+  if (version.fieldPosition !== undefined || version.featureDefinitionVersion !== undefined
+    || (version.comparisonScope && !version.comparisonScope.leagueId.trim())) return false;
   const hasPassing = "passingEfficiency" in components && "passingProduction" in components && "ballControl" in components;
   const hasRushing = "rushingContribution" in components;
   const hasSituation = "situationalImpact" in components;
   if (version.path === "QB_RUSH_ONLY_SPECIAL") {
-    return !context && !hasPassing && hasRushing && !hasSituation
+    return !context && !hasPassing && hasRushing && !hasSituation && version.comparisonScope?.basis !== "BRIDGE_REFERENCE"
       && version.firstDownDefinitionVersion === undefined && version.situationDefinitionVersion === undefined;
   }
   if (!context || context.version !== version.contextVersion || !hasPassing) return false;
+  if (version.comparisonScope?.basis === "BRIDGE_REFERENCE" && context.leagueStrengthExcluded !== true) return false;
   const firstDowns = context.nonTouchdownFirstDowns;
   if (version.path === "QB_STANDARD_CORE") {
     return !hasRushing && !hasSituation && !firstDowns
@@ -76,6 +80,7 @@ export function scoreQbSeason(games: readonly QbGameAnalysis[], policy: QbSeason
     terms.push(aggregate(models.situationalImpact, played.map((game) => {
       const evidence = game.components.situationalImpact;
       if (game.situationDefinitionVersion !== version.situationDefinitionVersion) return { status: "UNUSABLE" };
+      if (version.comparisonScope?.basis === "BRIDGE_REFERENCE" && !game.situationLeagueStrengthExcluded) return { status: "UNUSABLE" };
       return sample(evidence, evidence.status === "AVAILABLE" ? evidence.value.opportunities : 0);
     })));
   }

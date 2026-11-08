@@ -1,5 +1,6 @@
 import type { DataOrigin } from "./observations.ts";
 import type { Position } from "./statistics.ts";
+import type { FieldPath, FieldPosition } from "../models/positions/catalog.ts";
 
 export type RatingKind = "SEASON_PERFORMANCE" | "OVERALL";
 export type RatingStatus = "NOT_RATED" | "PROVISIONAL" | "OFFICIAL";
@@ -8,16 +9,22 @@ export type QbPath = "QB_STANDARD_CORE" | "QB_EXTENDED_PRODUCTION" | "QB_ADVANCE
 export type RatingReason = "REAL_DATA_DISABLED" | "INVALID_SCOPE" | "INCOMPLETE_COVERAGE"
   | "UNVERIFIED_USAGE" | "NO_PASSING_EXPOSURE" | "MISSING_CORE" | "UNUSABLE_CORE"
   | "INVALID_CORE" | "MISSING_COMPONENT" | "NO_VALIDATED_MODEL_PATH" | "INVALID_MODEL_OUTPUT"
-  | "NO_COMPATIBLE_HISTORY" | "PASSING_EXPOSURE_IN_RUSH_ONLY";
+  | "NO_COMPATIBLE_HISTORY" | "PASSING_EXPOSURE_IN_RUSH_ONLY" | "LEAGUE_CONTEXT_UNAVAILABLE";
 
 export interface ModelVersion {
   readonly methodVersion: string;
   readonly parameterVersion: string;
   readonly contextVersion: string;
-  readonly path: QbPath;
+  readonly path: QbPath | FieldPath;
   readonly maturity: "UNVALIDATED_SIMULATION";
   readonly firstDownDefinitionVersion?: string;
   readonly situationDefinitionVersion?: string;
+  readonly fieldPosition?: FieldPosition;
+  readonly featureDefinitionVersion?: string;
+  readonly comparisonScope?: {
+    readonly basis: "LEAGUE" | "BRIDGE_REFERENCE";
+    readonly leagueId: string;
+  };
 }
 
 export interface Confidence {
@@ -28,6 +35,7 @@ export interface Confidence {
   readonly verifiedUsageGames: number;
   readonly usableCoreGames: number;
   readonly passingAttempts: number;
+  readonly componentExposures?: Readonly<Record<string, number>>;
 }
 
 export interface RatingScope {
@@ -54,6 +62,7 @@ type ResultProduct =
       readonly dataVersion: string;
       readonly schemaVersion: string;
       readonly stintIds: readonly string[];
+      readonly leagueContextEvidenceIds?: readonly string[];
     }
   | {
       readonly kind: "OVERALL";

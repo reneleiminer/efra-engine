@@ -15,6 +15,8 @@ export function planImport(
 ): ImportPlan {
   if (manifest.origin !== "SYNTHETIC") return { status: "BLOCKED", reason: "REAL_IMPORT_DISABLED" };
   if (!/^[a-f0-9]{64}$/.test(manifest.payloadSha256) || !Number.isFinite(timestamp(manifest.retrievedAt))
+    || (manifest.supersedesSourceRevision !== undefined
+      && (!manifest.supersedesSourceRevision.trim() || manifest.supersedesSourceRevision === manifest.sourceRevision))
     || [manifest.sourceId, manifest.sourceRevision, manifest.competitionId, manifest.seasonId,
       manifest.mappingVersion, manifest.schemaVersion].some((id) => !id.trim())) {
     return { status: "BLOCKED", reason: "INVALID_MANIFEST" };

@@ -17,7 +17,7 @@ Der TypeScript-Einstiegspunkt **planImport** prüft offline bereits typisierte, 
 
 ## PostgreSQL-Speichervertrag
 
-**ImportStageStore** trennt den reinen Qualitätsentscheid von einer späteren Transaktion. Als erste isolierte Umsetzung eignet sich ein eigener Schema-Namensraum für Import und Review. Folgende Tabellen und Schlüssel sind der Entwurf für einen separaten Migrations-PR.
+**ImportStageStore** trennt den reinen Qualitätsentscheid von der Transaktion. Die folgende Tabelle dokumentiert den ursprünglichen Entwurf. Die [implementierten Migrationen und der Neon-Katalogabgleich](postgres-staging.md) beschreiben den aktuellen Stand.
 
 | Relation | Daten und Invarianten |
 | --- | --- |
@@ -37,4 +37,4 @@ Die Staging-Transaktion reserviert zuerst den Revisionsschlüssel atomar. Bei id
 3. Adapter-Integration mit parallelen Replays, Crash-Rollback, Revisionskonflikten, verweigerten Rechten und stichtagsgebundenen Snapshot-Reads prüfen. Idempotenz stützt sich auf Datenbank-Constraints und eine Transaktion, nicht auf eine vorgelagerte Existenzabfrage.
 4. Offene Entscheidungen betreffen Lieferformat und Rechte pro Quelle, die Auslegung von Provider-Revisionen, Aufbewahrung und Datenschutz, Identitätsauflösung bei Transfers, getrennte Review-Rollen, Mindestabdeckung für eine Pilotfreigabe und empirische Validierung der Modellreferenzen.
 
-Dieser PR enthält den lokalen Dry Run, den Storage-Port und den Speicherentwurf. Es wurde keine PostgreSQL-Verbindung aufgebaut und kein Schema ausgeführt.
+Die initiale Importphase lieferte den lokalen Dry Run, den Storage-Port und den Speicherentwurf. Der aktuelle Adapter und sein Testbericht stehen in der [PostgreSQL-Staging-Dokumentation](postgres-staging.md).

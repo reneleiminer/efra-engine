@@ -112,7 +112,8 @@ CREATE TABLE efra_validation.evaluation_ticket (
   xid xid8 NOT NULL DEFAULT pg_current_xact_id()
 );
 CREATE TABLE efra_validation.evaluation_redemption (
-  ticket_id uuid PRIMARY KEY REFERENCES efra_validation.evaluation_ticket
+  ticket_id uuid PRIMARY KEY REFERENCES efra_validation.evaluation_ticket,
+  xid xid8 NOT NULL DEFAULT pg_current_xact_id()
 );
 CREATE TABLE efra_validation.consumed_holdout (
   evidence_key text PRIMARY KEY REFERENCES efra_validation.evidence_partition,
@@ -348,7 +349,7 @@ BEGIN
   JOIN efra_validation.principal p ON p.subject = a.approver AND efra_validation.has_capability(p,'approver')
   WHERE t.id = ticket AND t.worker = actor AND t.xid <> pg_current_xact_id();
   IF NOT FOUND THEN RAISE EXCEPTION 'Committed evaluation ticket required' USING ERRCODE = '42501'; END IF;
-  INSERT INTO efra_validation.evaluation_redemption VALUES (ticket);
+  INSERT INTO efra_validation.evaluation_redemption(ticket_id) VALUES (ticket);
   INSERT INTO efra_validation.audit(actor,action,resource,detail) VALUES (actor,'TEST_READ',dataset_key,ticket::text);
   RETURN result;
 END;
@@ -358,8 +359,11 @@ CREATE FUNCTION efra_validation.record_report(dataset_key text, run uuid, report
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE actor text := efra_validation.subject('worker');
 BEGIN
-  IF NOT EXISTS (SELECT FROM efra_validation.evaluation e WHERE (e.dataset_id,e.run_id,e.worker) = (dataset_key,run,actor))
-  THEN RAISE EXCEPTION 'Evaluation is not assigned to worker' USING ERRCODE = '42501'; END IF;
+  IF NOT EXISTS (SELECT FROM efra_validation.evaluation e
+    JOIN efra_validation.evaluation_ticket t ON (t.dataset_id,t.worker) = (e.dataset_id,e.worker)
+    JOIN efra_validation.evaluation_redemption r ON r.ticket_id = t.id AND r.xid <> pg_current_xact_id()
+    WHERE (e.dataset_id,e.run_id,e.worker) = (dataset_key,run,actor))
+  THEN RAISE EXCEPTION 'A committed holdout read is required for the assigned run' USING ERRCODE = '42501'; END IF;
   IF report IS NULL THEN
     INSERT INTO efra_validation.audit(actor,action,resource,detail) VALUES (actor,'EVALUATION_FAILED',dataset_key,run::text);
     RETURN;

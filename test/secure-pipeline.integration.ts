@@ -754,6 +754,9 @@ test("SIMULATION | canonical import to independent holdout, private review, and 
     await workerTransaction.query("ROLLBACK");
     workerTransaction.release();
   }
+  await actorPool("worker").query("SELECT efra_validation.claim_evaluation($1,$2,$3)", [dataset, run, engine]);
+  await assert.rejects(actorPool("worker").query("SELECT efra_validation.record_report($1,$2,NULL::jsonb)",
+    [dataset, run]), { code: "42501" });
   const both = await Promise.allSettled([worker.evaluate(dataset, run), worker.evaluate(dataset, uuid("32"))]);
   assert.equal(both.filter(({ status }) => status === "fulfilled").length, 1);
   const accepted = both[0]!.status === "fulfilled" ? run : uuid("32");
@@ -785,7 +788,7 @@ test("SIMULATION | canonical import to independent holdout, private review, and 
     "SELECT action,actor FROM efra_validation.audit WHERE resource=$1 ORDER BY id", [dataset],
   );
   assert.equal(audit.filter(({ action }) => action === "TEST_OPEN").length, 1);
-  assert.equal(audit.filter(({ action }) => action === "TEST_REPLAY").length, 1);
+  assert.equal(audit.filter(({ action }) => action === "TEST_REPLAY").length, 2);
   assert.equal(audit.filter(({ action }) => action === "TEST_READ").length, 2);
   assert.ok(audit.some(({ action, actor }) => action === "APPROVED" && actor === approverId));
   assert.ok(audit.some(({ action }) => action === "REPORT_READ"));

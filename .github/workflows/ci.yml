@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [postgres, neon-integration, secure-pipeline]
+        suite: [postgres, neon-integration, secure-pipeline, statistical-pilot]
     services:
       postgres:
         image: postgres:18

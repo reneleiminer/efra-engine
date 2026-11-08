@@ -51,7 +51,7 @@ function validateRow(row: QbStatRow, game: QbScheduledGame) {
   }), "Non-participation conflicts with statistical fields");
 }
 
-function validateDataset(dataset: QbStatDataset, now: number) {
+export function validateStatisticalDataset(dataset: QbStatDataset, now: number) {
   const { group } = dataset;
   const start = timestamp(group.startsAt), end = timestamp(group.endsBefore), asOf = timestamp(dataset.asOf);
   requirePilot(dataset.schema === statisticalVersion && dataset.passingDefinition === qbPassingDefinitionVersion && text(dataset.version) && text(group.version)
@@ -111,7 +111,7 @@ export function loadStatisticalInput(input: QbStatInput, context: StatisticalCon
   const { body: dataset, person: reviewer } = authenticateStatistical(context, "STAT_DATA", input.dataset);
   const { body: policy, person: policyOwner } = authenticateStatistical(context, "STAT_POLICY", input.policy);
   const datasetSha256 = canonicalSha256(dataset), groupSha256 = canonicalSha256(dataset.group);
-  const scope = validateDataset(dataset, now);
+  const scope = validateStatisticalDataset(dataset, now);
   requirePilot(reviewer !== policyOwner && policy.schema === statisticalVersion && policy.groupSha256 === groupSha256
     && text(policy.version) && text(policy.rationale) && Number.isSafeInteger(policy.minimumAttempts) && policy.minimumAttempts > 0
     && ["PROVISIONAL", "APPROVED"].includes(policy.status) && policy.completeness === "ALL_EXPECTED_GAMES",

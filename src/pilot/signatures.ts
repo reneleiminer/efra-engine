@@ -3,7 +3,8 @@ import type { KeyObject } from "node:crypto";
 import { canonicalJson } from "../ingest/determinism.ts";
 
 export type PilotKeyPurpose = "ENGINE" | "RUN" | "REPORT" | "ACTION"
-  | "STAT_DATA" | "STAT_POLICY" | "STAT_RIGHTS" | "STAT_PUBLICATION" | "STAT_HONORS_PROPOSAL" | "STAT_HONORS_REVIEW";
+  | "STAT_DATA" | "STAT_POLICY" | "STAT_RIGHTS" | "STAT_PUBLICATION" | "STAT_HONORS_PROPOSAL" | "STAT_HONORS_REVIEW"
+  | "EFA_SCHEDULE" | "EFA_EXPORT" | "EFA_GAMEBOOK" | "EFA_ACCESS";
 
 export interface PilotKeyTrust {
   /** Lookup the current public key for this purpose and pilot environment. Revoked keys must be absent. */

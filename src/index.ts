@@ -78,3 +78,10 @@ export { honorsCategories, reviewPassingHonors } from "./statistical-performance
 export type * from "./statistical-performance/honors.ts";
 export { statisticalReadVersion, exportStatisticalReadModel } from "./statistical-performance/export.ts";
 export type * from "./statistical-performance/export.ts";
+export {
+  efaEvidenceVersion, efaPublicationResource, authorizeEfaIntake, reconcileEfaQbSeason, verifyEfaDeliveryBytes,
+} from "./statistical-performance/efa-evidence.ts";
+export type * from "./statistical-performance/efa-evidence.ts";
+export { efaPublicationTarget, PostgresEfaPublicationReader, PostgresEfaPublicationWriter } from "./statistical-performance/efa-publication.ts";
+export type { EfaPublicationBundle } from "./statistical-performance/efa-publication.ts";
+export { applyEfaPublicationTestMigration } from "./statistical-performance/efa-migration.ts";

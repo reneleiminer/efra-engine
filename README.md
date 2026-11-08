@@ -54,3 +54,7 @@ Pro Komponente ist der Saisonwert das mit dem jeweiligen Nenner gewichtete Mitte
 ## Testabdeckung
 
 Alle Berechnungstests tragen das Präfix `SIMULATION` und verwenden künstliche Identitäten und Statistiken. Sie prüfen die QB-Komponenten und Sonderpfade, alle drei Varianten der übrigen 23 Positionen, fehlende oder widersprüchliche Daten, Transfers und Mehrfachpositionen, Versionskonflikte, Ligabrücken, unkalibrierte Confidence und den eigenständigen Overall-Verlauf. Der Coverage-Befehl berichtet Zeilen-, Zweig- und Funktionsabdeckung des ausführbaren Codes.
+
+## Modellvalidierung
+
+Das [Studienprotokoll für die Modellvalidierung](docs/model-validation.md) beschreibt versionierte Referenzpopulationen, zeitlich getrennte Stichproben, Fehlerdiagnosen für SPR, OVR und Confidence sowie offene Freigabekriterien. Der getrennte Einstiegspunkt `runSyntheticValidation` liefert ausschließlich synthetische Forschungsberichte.

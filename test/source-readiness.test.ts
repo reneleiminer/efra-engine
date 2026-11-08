@@ -152,6 +152,18 @@ test("SIMULATION | fixture revisions are scoped, explicit and replayable across 
   await assert.rejects(run(transferred, fixture(transferred), correction.revision), /Conflicting/);
 });
 
+test("SIMULATION | one provider identity cannot resolve to different players or teams within a game", async () => {
+  const rows: SourceFixtureRow[] = [player, { ...player, recordKey: "sim-wr", position: "WR", fields: [] }];
+  for (const change of [{ playerId: uuid("44") }, { teamId: uuid("06"), opponentId: uuid("05") }]) {
+    await assert.rejects(inspectSourceFixture(epfrRequest, mapping(epfrRequest), {
+      readFixture: async () => fixture(epfrRequest, rows),
+    }, { resolve: async (...args) => {
+      const result = await resolver.resolve(...args);
+      return result && args[2].position === "WR" ? { ...result, ...change } : result;
+    } }), /Conflicting provider identity/);
+  }
+});
+
 const clipDigest = "b".repeat(64);
 const annotation: FilmAnnotation = {
   version: filmLabContractVersion, origin: "SYNTHETIC", protocolVersion: "sim-protocol-1",

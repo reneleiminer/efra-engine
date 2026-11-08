@@ -163,6 +163,12 @@ export async function inspectSourceFixture(
   const records = new Set<string>();
   const canonical = new Set<string>();
   const playerTeams = new Map<string, string>();
+  const playerAliases = new Map<string, string>();
+  const teamAliases = new Map<string, string>();
+  const bind = (aliases: Map<string, string>, key: string, id: string) => {
+    check(!aliases.has(key) || aliases.get(key) === id, "Conflicting provider identity within game");
+    aliases.set(key, id);
+  };
   let gameScope: string | undefined;
   const rows = [];
   for (const row of fixture.rows) {
@@ -180,6 +186,9 @@ export async function inspectSourceFixture(
       rows.push({ recordKey: row.recordKey, status: "UNRESOLVED_IDENTITY" as const });
       continue;
     }
+    bind(playerAliases, row.playerKey, resolved.playerId);
+    bind(teamAliases, row.teamKey, resolved.teamId);
+    bind(teamAliases, row.opponentKey, resolved.opponentId);
     const canonicalScope = canonicalSha256([resolved.competitionId, resolved.seasonId, resolved.gameId,
       [resolved.teamId, resolved.opponentId].sort()]);
     const canonicalKey = JSON.stringify([resolved.gameId, resolved.playerId, resolved.position]);

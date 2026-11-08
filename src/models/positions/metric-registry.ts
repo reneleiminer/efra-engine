@@ -22,7 +22,7 @@ export interface PositionMetric {
   readonly definitionVersion: string;
 }
 
-interface MetricRule {
+export interface MetricRule {
   readonly position: Position;
   readonly upper: string;
   readonly fields: readonly string[];

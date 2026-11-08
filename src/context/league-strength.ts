@@ -1,8 +1,10 @@
-import { readObservation } from "../contracts/observations.ts";
+import { isVerifiedSource, readObservation } from "../contracts/observations.ts";
 import type { DataOrigin, Observation } from "../contracts/observations.ts";
 import type { Position } from "../contracts/statistics.ts";
 import type { ModelVersion } from "../contracts/rating.ts";
 import { timestamp } from "../contracts/time.ts";
+import { traceObservation } from "../contracts/lineage.ts";
+import type { LeagueInputTrace } from "../contracts/lineage.ts";
 
 export interface LeagueContextRequest {
   readonly origin: DataOrigin;
@@ -10,6 +12,7 @@ export interface LeagueContextRequest {
   readonly leagueId: string;
   readonly referenceLeagueId: string;
   readonly version: string;
+  readonly dataVersion: string;
   readonly asOf: string;
 }
 
@@ -35,19 +38,23 @@ export type LeagueStrengthEstimate =
       readonly adjustment: number;
       readonly simulationVariance: number;
       readonly evidenceIds: readonly string[];
+      readonly inputTrace: LeagueInputTrace;
     });
 
+/** Direct contrasts only, with independent bridge errors and caller-supplied simulation variances. */
 export function estimateSyntheticLeagueStrength(
   request: LeagueContextRequest,
   bridges: readonly LeagueBridge[],
 ): LeagueStrengthEstimate {
-  const { origin, position, leagueId, referenceLeagueId, version, asOf } = request;
+  const { origin, position, leagueId, referenceLeagueId, version, dataVersion, asOf } = request;
   const unavailable = { status: "UNAVAILABLE" } as const;
   const cutoff = timestamp(asOf);
   if (origin !== "SYNTHETIC" || !Number.isFinite(cutoff)
-    || [leagueId, referenceLeagueId, version].some((value) => !value.trim())) return unavailable;
+    || [leagueId, referenceLeagueId, version, dataVersion].some((value) => !value.trim())) return unavailable;
   const base = { ...request, origin: "SYNTHETIC", label: "SIMULATION", status: "AVAILABLE" } as const;
-  if (leagueId === referenceLeagueId) return { ...base, adjustment: 0, simulationVariance: 0, evidenceIds: [] };
+  if (leagueId === referenceLeagueId) return {
+    ...base, adjustment: 0, simulationVariance: 0, evidenceIds: [], inputTrace: { dataVersion, sources: [] },
+  };
   const evidence = [];
   const ids = new Set<string>();
   for (const bridge of bridges) {
@@ -64,7 +71,7 @@ export function estimateSyntheticLeagueStrength(
     if (!bridge.id.trim() || ids.has(bridge.id) || delta.status !== "AVAILABLE"
       || !Number.isFinite(precision) || precision <= 0) return unavailable;
     ids.add(bridge.id);
-    evidence.push({ id: bridge.id, delta: direct ? delta.value : -delta.value, precision });
+    evidence.push({ id: bridge.id, delta: direct ? delta.value : -delta.value, precision, input: traceObservation(bridge.difficultyDifference) });
   }
   evidence.sort((left, right) => left.id < right.id ? -1 : 1);
   const precision = evidence.reduce((sum, bridge) => sum + bridge.precision, 0);
@@ -72,13 +79,16 @@ export function estimateSyntheticLeagueStrength(
   const adjustment = evidence.reduce((sum, bridge) => sum + bridge.delta * (bridge.precision / precision), 0);
   const simulationVariance = 1 / precision;
   if (!Number.isFinite(adjustment) || !Number.isFinite(simulationVariance)) return unavailable;
-  return { ...base, adjustment, simulationVariance, evidenceIds: evidence.map(({ id }) => id) };
+  return {
+    ...base, adjustment, simulationVariance, evidenceIds: evidence.map(({ id }) => id),
+    inputTrace: { dataVersion, sources: evidence.map(({ id, input }) => ({ id, input })) },
+  };
 }
 
 export function resolveLeagueAdjustment(
   leagueId: string, position: Position, asOf: string, version: ModelVersion,
   scale: number | undefined, context: LeagueStrengthEstimate | undefined,
-) {
+): { value: number; evidenceIds: readonly string[]; inputTrace?: LeagueInputTrace } | null {
   const { comparisonScope, contextVersion } = version;
   if (!comparisonScope || comparisonScope.basis === "LEAGUE") {
     return (!comparisonScope || comparisonScope.leagueId === leagueId) && context === undefined && scale === undefined
@@ -90,10 +100,15 @@ export function resolveLeagueAdjustment(
     || context.version !== contextVersion || context.asOf !== asOf || !Number.isFinite(context.adjustment)
     || !Number.isFinite(context.simulationVariance) || context.simulationVariance < 0
     || new Set(context.evidenceIds).size !== context.evidenceIds.length || context.evidenceIds.some((id) => !id.trim())
+    || !context.dataVersion.trim() || context.inputTrace.dataVersion !== context.dataVersion
+    || context.inputTrace.sources.length !== context.evidenceIds.length
+    || context.inputTrace.sources.some(({ id, input }, index) => id !== context.evidenceIds[index]
+      || (input.status !== "OBSERVED" && input.status !== "VERIFIED_ZERO") || input.sources.length !== 1
+      || input.sources.some((source) => !isVerifiedSource(source, "SYNTHETIC")))
     || (context.leagueId !== context.referenceLeagueId && (context.evidenceIds.length === 0 || context.simulationVariance === 0))
     || (context.leagueId === context.referenceLeagueId
       && (context.adjustment !== 0 || context.simulationVariance !== 0 || context.evidenceIds.length !== 0))
     || scale === undefined || !Number.isFinite(scale) || scale <= 0) return null;
   const value = scale * context.adjustment;
-  return Number.isFinite(value) ? { value, evidenceIds: context.evidenceIds } : null;
+  return Number.isFinite(value) ? { value, evidenceIds: context.evidenceIds, inputTrace: context.inputTrace } : null;
 }

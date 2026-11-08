@@ -1,4 +1,5 @@
 export type * from "./contracts/observations.ts";
+export type * from "./contracts/lineage.ts";
 export type * from "./contracts/rating.ts";
 export type * from "./contracts/statistics.ts";
 export type * from "./context/adjustment.ts";
@@ -18,4 +19,5 @@ export { calculateOverall } from "./overall/overall.ts";
 export { calculateSeasonPerformance } from "./season/performance.ts";
 export { calculateFieldSeasonPerformance } from "./season/field-performance.ts";
 export { describePositionModel } from "./models/positions/catalog.ts";
+export { describePositionDataRequirements, positionDataAvailabilityMatrix } from "./models/positions/data-requirements.ts";
 export { estimateSyntheticLeagueStrength } from "./context/league-strength.ts";

@@ -64,3 +64,5 @@ Die [kanonische Validierungsbrücke und Holdout-Verwaltung](docs/canonical-valid
 Die [Sicherheitsgrundlage für den synthetischen Pilotbetrieb](docs/pilot-security.md) beschreibt isolierte Endpunkte, authentifizierte Aktionen, signierte Läufe und Berichte sowie Betriebs- und Wiederherstellungsprüfungen.
 
 Das [lokale synthetische Pilotprofil](docs/secure-pilot-infrastructure.md) startet mit `npm run pilot:verify`. Die Abnahme prüft isolierte PostgreSQL-Instanzen, Worker, Rotation, Alarmierung und den Backup- und Restore-Pfad.
+
+Der [Quellenreifebericht](docs/source-readiness-2026.md) und die [maschinenlesbare Evidenzmatrix](docs/evidence-coverage-v1.json) erfassen öffentliche Feldkandidaten, API-Prüfstatus, Rechte und fehlende Nachweise für alle Positionsmodelle. Die versionierten Quellenports und das Film-Lab-Vertragsmodell sind für synthetische Prüfungen vorgesehen.

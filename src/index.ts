@@ -35,3 +35,6 @@ export { PostgresSecurePipeline, qbPassingProjection } from "./ingest/postgres-s
 export type { AuthenticatedReview, RatingReplayReference } from "./ingest/postgres-secure-pipeline.ts";
 export { PostgresPositionPipeline } from "./ingest/postgres-position-pipeline.ts";
 export type { PositionRelease, PositionReplayRequest, PositionSimulationReplay, ProjectedPositionFact } from "./ingest/postgres-position-pipeline.ts";
+
+export type * from "./validation/contracts.ts";
+export { runSyntheticValidation, validationProtocolVersion } from "./validation/study.ts";

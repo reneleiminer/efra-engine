@@ -926,7 +926,12 @@ test("SIMULATION | pilot locks the measured bundle and signed report across a co
     worker.evaluate(dataset, runId, authorization, artifacts), worker.evaluate(dataset, runId, authorization, artifacts),
   ]);
   assert.deepEqual(receipts, Array(2).fill({ label: "SIMULATION", officialEligible: false, datasetSha256 }));
-  const report = await worker.readReport(await approver.requestPrivateReport(dataset), "sim-validation-approver", authorization);
+  const ticket = await approver.requestPrivateReport(dataset);
+  const recipient = "sim-validation-approver";
+  await assert.rejects(new PostgresValidationWorker(db, engine).readPrivateReport(ticket, recipient), { code: "42501" });
+  await assert.rejects(db.query("SELECT efra_validation.read_report_internal($1,$2)", [ticket, recipient]), { code: "42501" });
+  await assert.rejects(worker.readReport(ticket, recipient, otherRun), { failure: "ACCESS_DENIED" });
+  const report = await worker.readReport(ticket, recipient, authorization);
   assert.equal(report.result.empiricalValidation, false);
   assert.equal(report.result.test.count, 1);
   assert.throws(() => verifyPilotReport(environment, { ...report, bridgeExclusions: [{ id: "changed", partition: "test", issues: [] }] },

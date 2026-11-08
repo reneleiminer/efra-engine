@@ -147,7 +147,8 @@ export async function createVerifiedPilotWorker(options: {
         verifyPilot(environment, "ENGINE", manifest, trust);
         requirePilot(run.engineSha256 === engine.engineSha256, "Pilot report belongs to a different build");
         const { rows: [row] } = await db.query<{ report: SignedPrivateValidationReport }>(
-          "SELECT efra_validation.read_report($1,$2) AS report", [ticket, recipient],
+          "SELECT efra_validation.read_pilot_report($1,$2,$3,$4,$5) AS report",
+          [ticket, recipient, run.datasetId, run.runId, canonicalSha256(run)],
         );
         requirePilot(row, "Missing signed pilot report");
         return verifyPilotReport(environment, row.report, authorization, trust);

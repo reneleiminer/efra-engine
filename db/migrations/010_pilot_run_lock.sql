@@ -80,9 +80,36 @@ $$;
 CREATE TRIGGER require_pilot_report_binding BEFORE INSERT ON efra_validation.report
   FOR EACH ROW EXECUTE FUNCTION efra_validation.require_pilot_report_binding();
 
+ALTER FUNCTION efra_validation.read_report(uuid,text) RENAME TO read_report_internal;
+REVOKE EXECUTE ON FUNCTION efra_validation.read_report_internal(uuid,text) FROM efra_validation_worker;
+
+CREATE FUNCTION efra_validation.read_report(ticket uuid, recipient text) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  PERFORM efra_validation.subject('worker');
+  IF EXISTS (SELECT FROM efra_validation.development_ticket t JOIN efra_validation.pilot_run p ON p.dataset_id = t.dataset_id
+    WHERE t.id = ticket)
+  THEN RAISE EXCEPTION 'Pilot report requires the locked manifest' USING ERRCODE = '42501'; END IF;
+  RETURN efra_validation.read_report_internal(ticket,recipient);
+END;
+$$;
+
+CREATE FUNCTION efra_validation.read_pilot_report(ticket uuid, recipient text, dataset_key text, run uuid, manifest_hash text)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  PERFORM efra_validation.subject('worker');
+  IF NOT EXISTS (SELECT FROM efra_validation.development_ticket t JOIN efra_validation.pilot_run p ON p.dataset_id = t.dataset_id
+    WHERE t.id = ticket AND t.researcher = recipient AND (p.dataset_id,p.run_id,p.manifest_sha256) = (dataset_key,run,manifest_hash))
+  THEN RAISE EXCEPTION 'Pilot report ticket does not match the locked manifest' USING ERRCODE = '42501'; END IF;
+  RETURN efra_validation.read_report_internal(ticket,recipient);
+END;
+$$;
+
 REVOKE ALL ON FUNCTION efra_validation.register_pilot_run(text,uuid,text,text,text),
   efra_validation.claim_evaluation(text,uuid,text), efra_validation.claim_pilot_evaluation(text,uuid,text,text,text),
-  efra_validation.require_pilot_report_binding() FROM PUBLIC;
+  efra_validation.require_pilot_report_binding(), efra_validation.read_report(uuid,text),
+  efra_validation.read_pilot_report(uuid,text,text,uuid,text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION efra_validation.register_pilot_run(text,uuid,text,text,text) TO efra_validation_approver;
 GRANT EXECUTE ON FUNCTION efra_validation.claim_evaluation(text,uuid,text),
-  efra_validation.claim_pilot_evaluation(text,uuid,text,text,text) TO efra_validation_worker;
+  efra_validation.claim_pilot_evaluation(text,uuid,text,text,text), efra_validation.read_report(uuid,text),
+  efra_validation.read_pilot_report(uuid,text,text,uuid,text) TO efra_validation_worker;

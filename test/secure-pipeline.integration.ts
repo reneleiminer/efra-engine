@@ -5,13 +5,15 @@ import { after, before, test } from "node:test";
 import { Pool } from "pg";
 import {
   applyIngestTestMigrations, describePositionModel, PostgresImportIdentityResolver, PostgresImportStageStore,
-  PostgresPositionPipeline, PostgresSecurePipeline, positionMetricRegistry, qbPassingProjection,
+  PostgresPositionPipeline, PostgresSecurePipeline, PostgresValidationApprover, PostgresValidationCustodian,
+  PostgresValidationResearcher, PostgresValidationWorker, positionMetricRegistry, positionMetricRegistryVersion, qbPassingProjection,
 } from "../src/index.ts";
 import type {
-  FieldPath, FieldPosition, FieldSeasonSimulation, ImportCandidate, ImportManifest, ImportPlan, MigrationFile,
+  CanonicalValidationRecipe, FieldPath, FieldPosition, FieldSeasonSimulation, ImportCandidate, ImportManifest, ImportPlan, MigrationFile,
   MigrationTestTarget, Observation, Position, PositionReplayRequest, QbGame, QbSeasonSimulation, SnapshotRequest,
 } from "../src/index.ts";
 import { positionComponents } from "../src/models/positions/catalog.ts";
+import { canonicalSha256 } from "../src/ingest/determinism.ts";
 import { gameObservations } from "../src/models/positions/metric-registry.ts";
 import type { SourceCapability } from "../src/models/positions/data-requirements.ts";
 import { advancedPolicy, game, policy, season, source } from "./simulation-fixtures.ts";
@@ -42,7 +44,10 @@ const actors = {
   reader: { capability: "READER", group: "reader", active: true },
   disabled: { capability: "IMPORTER", group: "importer", active: false },
 } as const;
-type Actor = keyof typeof actors;
+const validationActors = {
+  custodian: "custodian", researcher: "researcher", researcher2: "researcher", approver: "approver", worker: "worker",
+} as const;
+type Actor = keyof typeof actors | keyof typeof validationActors;
 const pools = new Map<Actor, Pool>();
 const actorPool = (actor: Actor) => {
   const pool = pools.get(actor);
@@ -81,7 +86,7 @@ before(async () => {
     await client.query("BEGIN");
     await client.query(await readFile(new URL("fixtures/efra-identity-simulation.sql", import.meta.url), "utf8"));
     for (const key of Object.keys(actors) as Actor[]) {
-      const { capability, group, active } = actors[key];
+      const { capability, group, active } = actors[key as keyof typeof actors];
       const login = `efra_p10_${key}`;
       const password = randomBytes(32).toString("hex");
       // Identifiers are fixed fixture names; passwords are generated hexadecimal strings.
@@ -90,6 +95,24 @@ before(async () => {
       await client.query(`INSERT INTO efra_ingest.authenticated_principal (login_role, login_oid, subject_id, capability, active)
         SELECT rolname, oid, $2, $3, $4 FROM pg_catalog.pg_roles WHERE rolname = $1`,
         [login, `sim-subject-${key}`, capability, active]);
+      const account = new URL(url);
+      account.username = login;
+      account.password = password;
+      pools.set(key, new Pool({ connectionString: account.toString(), max: 4, connectionTimeoutMillis: 15_000 }));
+    }
+    for (const key of Object.keys(validationActors) as (keyof typeof validationActors)[]) {
+      const group = validationActors[key];
+      const login = `efra_p13_${key}`;
+      const password = randomBytes(32).toString("hex");
+      await client.query(`CREATE ROLE ${login} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '${password}'`);
+      await client.query(`GRANT efra_validation_${group} TO ${login} WITH INHERIT TRUE, SET FALSE`);
+      await client.query(`INSERT INTO efra_validation.principal (login, login_oid, subject, capability)
+        SELECT rolname, oid, $2, $3 FROM pg_catalog.pg_roles WHERE rolname = $1`, [login, `sim-validation-${key}`, group]);
+      if (key === "custodian") {
+        await client.query(`GRANT efra_ingest_reader TO ${login} WITH INHERIT TRUE, SET FALSE`);
+        await client.query(`INSERT INTO efra_ingest.authenticated_principal (login_role, login_oid, subject_id, capability)
+          SELECT rolname, oid, 'sim-validation-custodian', 'READER' FROM pg_catalog.pg_roles WHERE rolname = $1`, [login]);
+      }
       const account = new URL(url);
       account.username = login;
       account.password = password;
@@ -377,7 +400,7 @@ function artifactsFor(game: ImportCandidate["game"], field: string, capability: 
     : [capability === "BOX_SCORE_CANDIDATE" ? "BOX_SCORE" : capability];
   return kinds.map((kind) => ({
     kind, field, gameId: game.gameId, playerId: game.playerId, position: game.position,
-    reference: `sim-artifact-${kind}-${field}`, sha256: "2".repeat(64),
+    reference: `sim-artifact-${kind}-${field}`, sha256: canonicalSha256([game.gameId, game.playerId, game.position, field, kind]),
   }));
 }
 
@@ -612,4 +635,154 @@ test("SIMULATION | a valid mapping still requires exact per-metric evidence befo
   await attest(evidence);
   await assert.rejects(service("publisher").release(early), /independently attested evidence/);
   assert.equal(await service("publisher").release(await snapshot(early.snapshotId, [id])), "CREATED");
+});
+
+test("SIMULATION | canonical import to independent holdout, private review, and exact audited replay", async () => {
+  const gameIds = [uuid("21"), uuid("22"), uuid("23")];
+  const engine = canonicalSha256("SIMULATION phase 13 worker");
+  const model = canonicalSha256("SIMULATION phase 13 model");
+  const custodian = new PostgresValidationCustodian(actorPool("custodian"));
+  const entries: CanonicalValidationRecipe["entries"][number][] = [];
+  const cohort = {
+    id: "sim-holdout-pop", version: "sim-holdout-ref-1", origin: "SYNTHETIC", position: "QB", leagueId: uuid("02"),
+    seasonId: uuid("03"), competitionLevel: "SIMULATION", startsAt: "2025-01-01T00:00:00.000Z",
+    endsAt: "2090-01-01T00:00:00.000Z", membershipLockedAt: "2025-01-01T00:00:00.000Z",
+    memberPlayerIds: [uuid("07")],
+  } as const;
+  for (const [index, gameId] of gameIds.entries()) {
+    const suffix = String(index);
+    const snapshotId = "sim-p13-snapshot-" + suffix;
+    const revision = "sim-p13-revision-" + suffix;
+    const externalGame = "sim-p13-game-" + suffix;
+    const candidate = fixture(revision, 80 + index * 20);
+    await admin.query("INSERT INTO efra.games (id,season_id,kickoff_at,home_team_id,away_team_id,status) VALUES ($1,$2,$3,$4,$5,'final')",
+      [gameId, uuid("03"), game.playedAt, uuid("04"), uuid("05")]);
+    await admin.query("INSERT INTO efra.external_ids (source_id,entity_type,entity_id,external_key) VALUES ($1,'game',$2,$3)",
+      [uuid("01"), gameId, externalGame]);
+    await admin.query("INSERT INTO efra.player_appearances (game_id,player_id,team_id,position_code,snaps,exposure_quality) VALUES ($1,$2,$3,'QB',10,'verified')",
+      [gameId, uuid("07"), uuid("04")]);
+    await releasePosition(manifest(revision), [{ ...candidate, game: { ...candidate.game, gameId: externalGame } }], snapshotId);
+    assert.equal(await positionPipeline("projector").project(snapshotId), "PROJECTED");
+    const at = await custodian.observeRelease(snapshotId);
+    assert.ok(at);
+    assert.equal(await custodian.observeRelease(snapshotId), at);
+    entries.push({ id: "sim-p13-sample-" + suffix, snapshotId, populationId: cohort.id, playerId: uuid("07"),
+      stintId: "sim-p13-stint-" + suffix, clusterId: "sim-p13-cluster-" + suffix,
+      predictedAt: at, expectedGames: [{ gameId, teamId: uuid("04") }],
+      policyFields: { "context.expectedTouchdowns": {
+        availableAt: at, evidenceIds: ["sim-p13-baseline-" + suffix],
+        observation: { status: "OBSERVED", value: 1, source },
+      } },
+      features: { main: { kind: "CANONICAL_METRIC", field: "passing.yards", offset: 0, scale: 0.5 } },
+      target: { eventAt: game.playedAt, availableAt: at, value: 40 + index * 10, evidenceIds: ["sim-p13-outcome-" + suffix],
+        artifactSha256: canonicalSha256(["SIMULATION independent SPR target", suffix]) },
+    });
+  }
+  const [train, validation, holdout] = entries;
+  const end = new Date(Date.parse(holdout!.predictedAt) + 100).toISOString();
+  const recipe: CanonicalValidationRecipe = { engineArtifactSha256: engine, modelArtifactSha256: model, entries,
+    header: { product: "SPR", candidates: [{ id: "sim-p13-model", weights: { main: 1 } }], sensitivity: [],
+      populations: [cohort], plan: { origin: "SYNTHETIC", version: "sim-p13-plan", dataVersion: "sim-p13-data",
+        modelVersion: "sim-p13-model", registryVersion: positionMetricRegistryVersion, position: "QB", pathId: "QB_STANDARD_CORE",
+        windows: { train: { start: train!.predictedAt, end: validation!.predictedAt },
+          validation: { start: validation!.predictedAt, end: holdout!.predictedAt }, test: { start: holdout!.predictedAt, end } },
+        frozenAt: end, outcome: { kind: "SEASON_REFERENCE", definitionVersion: "sim-p13-spr-reference" },
+        coverage: { minimumGames: 1, minimumExposure: { "passing.attempts": 1 } },
+        minimumGroupSize: 1, minimumPartitionClusters: { train: 1, validation: 1, test: 1 }, playerDisjoint: false,
+      },
+    },
+  };
+  const researcher = new PostgresValidationResearcher(actorPool("researcher"));
+  const approver = new PostgresValidationApprover(actorPool("approver"));
+  const worker = new PostgresValidationWorker(actorPool("worker"), engine);
+  const dataset = "sim-p13-dataset";
+  const researcherId = "sim-validation-researcher";
+  const approverId = "sim-validation-approver";
+  const run = uuid("31");
+  const sealed = await custodian.seal(dataset, researcherId, recipe);
+  assert.equal(sealed.status, "SEALED");
+  assert.deepEqual(await custodian.seal(dataset, researcherId, recipe), { ...sealed, status: "ALREADY_SEALED" });
+  await assert.rejects(actorPool("researcher").query("SELECT payload FROM efra_validation.dataset"), { code: "42501" });
+  await assert.rejects(actorPool("researcher").query("SELECT * FROM efra_ingest.approved_snapshot_export"), { code: "42501" });
+  await assert.rejects(actorPool("reader").query("SELECT * FROM efra_validation.canonical_proofs($1)", [holdout!.snapshotId]), { code: "42501" });
+  await assert.rejects(actorPool("researcher").query("SELECT efra_validation.request_development($1,'test')", [dataset]), { code: "42501" });
+  await assert.rejects(new PostgresValidationResearcher(actorPool("researcher2")).requestDevelopment(dataset, "train"), { code: "42501" });
+  await admin.query("GRANT efra_ingest_reader TO efra_p13_researcher WITH INHERIT TRUE, SET FALSE");
+  try {
+    await assert.rejects(researcher.requestDevelopment(dataset, "train"), { code: "42501" });
+  } finally {
+    await admin.query("REVOKE efra_ingest_reader FROM efra_p13_researcher");
+  }
+  await assert.rejects(worker.evaluate(dataset, run), { code: "42501" });
+  await assert.rejects(new PostgresValidationApprover(actorPool("custodian")).approve(dataset, sealed.datasetSha256, "SIMULATION"), { code: "42501" });
+  await assert.rejects(approver.approve(dataset, sealed.datasetSha256, "SIMULATION before review"), { code: "42501" });
+  await assert.rejects(approver.approve(dataset, "a".repeat(64), "SIMULATION"), { code: "42501" });
+  const trainTicket = await researcher.requestDevelopment(dataset, "train");
+  await assert.rejects(worker.readDevelopment(trainTicket, "sim-validation-researcher2"), { code: "42501" });
+  const dev = await worker.readDevelopment(trainTicket, researcherId);
+  assert.deepEqual(dev.samples.map(({ id }) => id), [train!.id]);
+  assert.equal(dev.samples[0]!.fields["passing.interceptions"]?.observation.status, "VERIFIED_ZERO");
+  assert.ok(!JSON.stringify(dev).includes(holdout!.id));
+  await assert.rejects(worker.readDevelopment(trainTicket, researcherId), { code: "23505" });
+  const validationTicket = await researcher.requestDevelopment(dataset, "validation");
+  assert.deepEqual((await worker.readDevelopment(validationTicket, researcherId)).samples.map(({ id }) => id), [validation!.id]);
+  const review = await approver.reviewManifest(dataset);
+  assert.equal(review.datasetSha256, sealed.datasetSha256);
+  assert.equal(review.product, "SPR");
+  assert.ok(!JSON.stringify(review).includes(holdout!.id));
+  await approver.approve(dataset, sealed.datasetSha256, "SIMULATION independent approval");
+  await assert.rejects(new PostgresValidationWorker(actorPool("worker"), "c".repeat(64)).evaluate(dataset, run), { code: "42501" });
+  const workerTransaction = await actorPool("worker").connect();
+  try {
+    await workerTransaction.query("BEGIN");
+    const { rows: [pending] } = await workerTransaction.query<{ ticket: string }>(
+      "SELECT efra_validation.claim_evaluation($1,$2,$3) AS ticket", [dataset, uuid("39"), engine],
+    );
+    await assert.rejects(workerTransaction.query("SELECT efra_validation.read_evaluation($1)", [pending!.ticket]), { code: "42501" });
+  } finally {
+    await workerTransaction.query("ROLLBACK");
+    workerTransaction.release();
+  }
+  const both = await Promise.allSettled([worker.evaluate(dataset, run), worker.evaluate(dataset, uuid("32"))]);
+  assert.equal(both.filter(({ status }) => status === "fulfilled").length, 1);
+  const accepted = both[0]!.status === "fulfilled" ? run : uuid("32");
+  assert.deepEqual(await worker.evaluate(dataset, accepted), { label: "SIMULATION", officialEligible: false,
+    datasetSha256: sealed.datasetSha256 });
+  const reportTicket = await approver.requestPrivateReport(dataset);
+  await assert.rejects(worker.readPrivateReport(reportTicket, researcherId), { code: "42501" });
+  const report = await worker.readPrivateReport(reportTicket, approverId);
+  assert.equal(report.result.empiricalValidation, false);
+  assert.equal(report.result.product, "SPR");
+  assert.equal(report.result.test.count, 1);
+  assert.deepEqual(await worker.readPrivateReport(await approver.requestPrivateReport(dataset), approverId), report);
+  await assert.rejects(actorPool("researcher").query("SELECT efra_validation.request_report($1)", [dataset]), { code: "42501" });
+
+  const copy = "sim-p13-copy";
+  assert.equal((await custodian.seal(copy, researcherId, recipe)).status, "SEALED");
+  await approver.reviewManifest(copy);
+  await approver.approve(copy, sealed.datasetSha256, "SIMULATION duplicate holdout probe");
+  await assert.rejects(worker.evaluate(copy, uuid("33")), { code: "23505" });
+  const { rows: [stored] } = await admin.query<{ payload: { datasetSha256: string; batches: {
+    partition: string; evidenceKeys: string[];
+  }[] } }>("SELECT payload FROM efra_validation.dataset WHERE id=$1", [dataset]);
+  const relocated = stored!.payload;
+  const testKeys = relocated.batches.find(({ partition }) => partition === "test")!.evidenceKeys;
+  relocated.batches.find(({ partition }) => partition === "train")!.evidenceKeys.push(testKeys.pop()!);
+  await assert.rejects(actorPool("custodian").query("SELECT efra_validation.seal($1,$2,$3,$4::jsonb)",
+    ["sim-p13-relocated", relocated.datasetSha256, researcherId, relocated]), { code: "23514" });
+  const { rows: audit } = await admin.query<{ action: string; actor: string }>(
+    "SELECT action,actor FROM efra_validation.audit WHERE resource=$1 ORDER BY id", [dataset],
+  );
+  assert.equal(audit.filter(({ action }) => action === "TEST_OPEN").length, 1);
+  assert.equal(audit.filter(({ action }) => action === "TEST_REPLAY").length, 1);
+  assert.equal(audit.filter(({ action }) => action === "TEST_READ").length, 2);
+  assert.ok(audit.some(({ action, actor }) => action === "APPROVED" && actor === approverId));
+  assert.ok(audit.some(({ action }) => action === "REPORT_READ"));
+  await assert.rejects(admin.query("DELETE FROM efra_validation.audit"), { code: "55000" });
+  await assert.rejects(actorPool("worker").query("DELETE FROM efra.stat_observations"), { code: "42501" });
+  const { rows: [state] } = await admin.query<{ count: number; absent: boolean }>(
+    "SELECT (SELECT count(*)::int FROM efra.stat_observations WHERE game_id=ANY($1::uuid[])) AS count,"
+    + " NOT EXISTS (SELECT FROM efra_validation.evaluation WHERE dataset_id=$2) AS absent", [gameIds, copy],
+  );
+  assert.deepEqual(state, { count: 36, absent: true });
 });

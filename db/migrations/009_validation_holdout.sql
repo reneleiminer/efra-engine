@@ -12,13 +12,11 @@ CREATE TABLE efra_validation.principal (
   capability text NOT NULL CHECK (capability IN ('custodian','researcher','approver','worker')),
   active boolean NOT NULL DEFAULT true
 );
-CREATE FUNCTION efra_validation.subject(required text) RETURNS text
-LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-DECLARE actor text;
-BEGIN
-  SELECT p.subject INTO actor FROM efra_validation.principal p
-  JOIN pg_catalog.pg_roles r ON (p.login, p.login_oid) = (r.rolname, r.oid) AND r.rolcanlogin
-  WHERE p.login = session_user AND p.active AND p.capability = required
+CREATE FUNCTION efra_validation.has_capability(principal efra_validation.principal, required text) RETURNS boolean
+LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+  SELECT EXISTS (SELECT FROM pg_catalog.pg_roles r
+  WHERE (principal.login, principal.login_oid) = (r.rolname, r.oid) AND r.rolcanlogin
+    AND principal.active AND principal.capability = required
     AND pg_has_role(r.oid, 'efra_validation_' || required, 'MEMBER')
     AND NOT EXISTS (SELECT FROM pg_catalog.pg_roles g
       WHERE ((g.rolname LIKE 'efra_validation_%' AND g.rolname IN
@@ -27,11 +25,32 @@ BEGIN
         OR (g.rolname = 'efra_ingest_reader' AND required <> 'custodian')
         OR g.rolname IN ('efra_ingest_importer','efra_ingest_reviewer','efra_ingest_publisher',
           'efra_ingest_projector','efra_ingest_evidence_attestor'))
-        AND pg_has_role(r.oid, g.oid, 'MEMBER'));
+        AND pg_has_role(r.oid, g.oid, 'MEMBER')));
+$$;
+CREATE FUNCTION efra_validation.subject(required text) RETURNS text
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE actor text;
+BEGIN
+  SELECT p.subject INTO actor FROM efra_validation.principal p
+  WHERE p.login = session_user AND efra_validation.has_capability(p,required);
   IF actor IS NULL THEN RAISE EXCEPTION 'Unauthorized validation principal' USING ERRCODE = '42501'; END IF;
   RETURN actor;
 END;
 $$;
+
+-- An accidentally dual-provisioned research principal may not bypass the vault via the old reader.
+ALTER FUNCTION efra_ingest.authenticated_subject(text) RENAME TO authenticated_ingest_subject;
+CREATE FUNCTION efra_ingest.authenticated_subject(required_capability text) RETURNS text
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  IF required_capability = 'READER' AND EXISTS (SELECT FROM pg_catalog.pg_roles r
+    WHERE r.rolname IN ('efra_validation_researcher','efra_validation_approver','efra_validation_worker')
+      AND pg_has_role(session_user,r.oid,'MEMBER'))
+  THEN RAISE EXCEPTION 'Canonical reads are incompatible with this validation role' USING ERRCODE = '42501'; END IF;
+  RETURN efra_ingest.authenticated_ingest_subject(required_capability);
+END;
+$$;
+REVOKE ALL ON FUNCTION efra_ingest.authenticated_subject(text) FROM PUBLIC;
 
 CREATE TABLE efra_validation.dataset (
   id text PRIMARY KEY CHECK (btrim(id) <> ''),
@@ -182,7 +201,7 @@ BEGIN
       FROM jsonb_array_elements(contents->'batches') AS batch)
       IS DISTINCT FROM ARRAY['test','train','validation']
     OR NOT EXISTS (SELECT FROM efra_validation.principal p
-      WHERE p.subject = research_subject AND p.capability = 'researcher' AND p.active)
+      WHERE p.subject = research_subject AND efra_validation.has_capability(p,'researcher'))
   THEN RAISE EXCEPTION 'Invalid synthetic validation manifest' USING ERRCODE = '23514'; END IF;
   PERFORM pg_advisory_xact_lock(716184, 13);
   SELECT * INTO existing FROM efra_validation.dataset WHERE id = dataset_key;
@@ -270,7 +289,7 @@ DECLARE
   result jsonb;
 BEGIN
   SELECT t.* INTO request FROM efra_validation.development_ticket t JOIN efra_validation.principal p
-    ON p.subject = t.researcher AND p.active AND p.capability = 'researcher'
+    ON p.subject = t.researcher AND efra_validation.has_capability(p,'researcher')
   WHERE t.id = ticket AND t.researcher = recipient AND t.partition IN ('train','validation') AND t.xid <> pg_current_xact_id();
   IF NOT FOUND THEN RAISE EXCEPTION 'Development ticket unavailable' USING ERRCODE = '42501'; END IF;
   INSERT INTO efra_validation.development_redemption VALUES (ticket);
@@ -295,7 +314,7 @@ BEGIN
   PERFORM pg_advisory_xact_lock(716184, 13);
   PERFORM 1 FROM efra_validation.dataset d JOIN efra_validation.approval a
     ON (d.id,d.sha256) = (a.dataset_id,a.sha256)
-  JOIN efra_validation.principal p ON p.subject = a.approver AND p.active AND p.capability = 'approver'
+  JOIN efra_validation.principal p ON p.subject = a.approver AND efra_validation.has_capability(p,'approver')
   WHERE d.id = dataset_key AND d.payload->>'engineArtifactSha256' = engine_digest
     AND a.xid <> pg_current_xact_id() AND actor NOT IN (d.researcher,d.custodian,a.approver);
   IF NOT FOUND THEN RAISE EXCEPTION 'No independent committed approval' USING ERRCODE = '42501'; END IF;
@@ -326,7 +345,7 @@ BEGIN
   SELECT t.dataset_id,d.payload INTO dataset_key,result FROM efra_validation.evaluation_ticket t
   JOIN efra_validation.dataset d ON d.id = t.dataset_id
   JOIN efra_validation.approval a ON a.dataset_id = t.dataset_id
-  JOIN efra_validation.principal p ON p.subject = a.approver AND p.active AND p.capability = 'approver'
+  JOIN efra_validation.principal p ON p.subject = a.approver AND efra_validation.has_capability(p,'approver')
   WHERE t.id = ticket AND t.worker = actor AND t.xid <> pg_current_xact_id();
   IF NOT FOUND THEN RAISE EXCEPTION 'Committed evaluation ticket required' USING ERRCODE = '42501'; END IF;
   INSERT INTO efra_validation.evaluation_redemption VALUES (ticket);
@@ -383,7 +402,7 @@ DECLARE
   result jsonb;
 BEGIN
   SELECT t.dataset_id, r.payload INTO dataset_key, result FROM efra_validation.development_ticket t
-  JOIN efra_validation.principal p ON p.subject = t.researcher AND p.active AND p.capability = 'approver'
+  JOIN efra_validation.principal p ON p.subject = t.researcher AND efra_validation.has_capability(p,'approver')
   JOIN efra_validation.report r ON r.dataset_id = t.dataset_id
   WHERE t.id = ticket AND t.researcher = recipient AND t.partition = 'report' AND t.xid <> pg_current_xact_id();
   IF NOT FOUND THEN RAISE EXCEPTION 'Report ticket unavailable' USING ERRCODE = '42501'; END IF;

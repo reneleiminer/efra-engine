@@ -707,10 +707,21 @@ test("SIMULATION | canonical import to independent holdout, private review, and 
   await assert.rejects(actorPool("reader").query("SELECT * FROM efra_validation.canonical_proofs($1)", [holdout!.snapshotId]), { code: "42501" });
   await assert.rejects(actorPool("researcher").query("SELECT efra_validation.request_development($1,'test')", [dataset]), { code: "42501" });
   await assert.rejects(new PostgresValidationResearcher(actorPool("researcher2")).requestDevelopment(dataset, "train"), { code: "42501" });
+  const revokedTicket = await researcher.requestDevelopment(dataset, "train");
+  await admin.query("REVOKE efra_validation_researcher FROM efra_p13_researcher");
+  try {
+    await assert.rejects(worker.readDevelopment(revokedTicket, researcherId), { code: "42501" });
+  } finally {
+    await admin.query("GRANT efra_validation_researcher TO efra_p13_researcher WITH INHERIT TRUE, SET FALSE");
+  }
   await admin.query("GRANT efra_ingest_reader TO efra_p13_researcher WITH INHERIT TRUE, SET FALSE");
   try {
+    await admin.query(`INSERT INTO efra_ingest.authenticated_principal (login_role,login_oid,subject_id,capability)
+      SELECT rolname,oid,'sim-dual-role-reader','READER' FROM pg_catalog.pg_roles WHERE rolname = 'efra_p13_researcher'`);
     await assert.rejects(researcher.requestDevelopment(dataset, "train"), { code: "42501" });
+    await assert.rejects(positionPipeline("researcher").readRelease(holdout!.snapshotId), { code: "42501" });
   } finally {
+    await admin.query("DELETE FROM efra_ingest.authenticated_principal WHERE login_role='efra_p13_researcher'");
     await admin.query("REVOKE efra_ingest_reader FROM efra_p13_researcher");
   }
   await assert.rejects(worker.evaluate(dataset, run), { code: "42501" });

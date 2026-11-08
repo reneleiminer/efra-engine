@@ -3,6 +3,7 @@ import { timestamp } from "../contracts/time.ts";
 import { describePositionModel, limitedFieldPaths } from "../models/positions/catalog.ts";
 import { describePositionDataRequirements } from "../models/positions/data-requirements.ts";
 import { positionMetricRegistry, positionMetricRegistryVersion } from "../models/positions/metric-registry.ts";
+import type { PositionMetric } from "../models/positions/metric-registry.ts";
 import { compareId } from "../season/scope.ts";
 import type { Partition, ReferencePopulation, TimedEvidence, ValidationSample, ValidationStudy } from "./contracts.ts";
 
@@ -19,6 +20,14 @@ export function ids(values: readonly string[], message: string) {
 
 export function ordered<T extends { readonly id: string }>(values: readonly T[]): T[] {
   return [...values].sort((a, b) => compareId(a.id, b.id));
+}
+
+function readMetric(observation: ValidationSample["fields"][string]["observation"], domain: PositionMetric["domain"]) {
+  return readObservation(observation, "SYNTHETIC", (n) => {
+    if (domain === "COUNT") return isCount(n);
+    if (domain === "SIGNED_INTEGER") return Number.isSafeInteger(n);
+    return domain === "SIGNED_DECIMAL" || n >= 0;
+  });
 }
 
 export function coverageRequirements(study: ValidationStudy) {
@@ -62,11 +71,7 @@ export function coverageIssues(
   for (const metric of requirements.metrics) {
     const { field, domain } = metric;
     const observation = field === removed ? undefined : Object.hasOwn(sample.fields, field) ? sample.fields[field]?.observation : undefined;
-    const value = observation && readObservation(observation, "SYNTHETIC", (n) => {
-      if (domain === "COUNT") return isCount(n);
-      if (domain === "SIGNED_INTEGER") return Number.isSafeInteger(n);
-      return domain === "SIGNED_DECIMAL" || n >= 0;
-    });
+    const value = observation && readMetric(observation, domain);
     if (value?.status === "AVAILABLE") values.set(field, value.value);
     if (!requirements.required.includes(metric)) continue;
     if (!value || value.status !== "AVAILABLE") {
@@ -227,7 +232,8 @@ export function prepareStudy(study: ValidationStudy) {
     const issues = coverageIssues(sample, study, requirements);
     for (const field of new Set(Object.values(sample.features).flatMap(({ metricFields }) => metricFields).sort(compareId))) {
       const item = sample.fields[field]!;
-      if (readObservation(item.observation, "SYNTHETIC", Number.isFinite).status !== "AVAILABLE") {
+      const metric = requirements.metrics.find((entry) => entry.field === field)!;
+      if (readMetric(item.observation, metric.domain).status !== "AVAILABLE") {
         issues.push(field + ":UNUSABLE_FEATURE_INPUT");
       }
     }

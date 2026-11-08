@@ -193,6 +193,10 @@ test("SIMULATION rejects contradictory counters and reports optional field depen
   const dependent = mutate(declared, 6, (sample) => ({ ...sample, fields: { ...sample.fields,
     [field]: { availableAt: sample.features.main!.availableAt, evidenceIds: sample.features.main!.evidenceIds, observation: observed(1) },
   } }));
+  const invalid = mutate(dependent, 6, (sample) => ({ ...sample, fields: { ...sample.fields,
+    [field]: { ...sample.fields[field]!, observation: observed(0.5) },
+  } }));
+  assert.ok(score(invalid).excluded[0]?.issues.includes(field + ":UNUSABLE_FEATURE_INPUT"));
   const stressed = score({ ...dependent,
     sensitivity: [{ id: "sim-optional-drop", kind: "REMOVE_FIELD", field }] });
   assert.deepEqual(stressed.sensitivity.map(({ retained, total, pairedMaeChange }) => ({ retained, total, pairedMaeChange })),

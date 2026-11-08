@@ -1,6 +1,6 @@
 # EFRA Rating Engine
 
-Eigenständige TypeScript-Bibliothek für positionsbezogene American-Football-Ratings. Das Fundament verarbeitet normalisierte, versionierte Eingaben im Speicher. Derzeit erzeugt es ausschließlich gekennzeichnete QB-Simulationen mit synthetischen Daten.
+Eigenständige TypeScript-Bibliothek für positionsbezogene American-Football-Ratings. Sie verarbeitet normalisierte, versionierte Eingaben im Speicher und erzeugt ausschließlich gekennzeichnete Simulationen mit synthetischen Daten.
 
 ## Lokal prüfen
 
@@ -19,10 +19,12 @@ Der Build erzeugt JavaScript und Typdeklarationen in `dist/`. GitHub Actions fü
 
 - `contracts/` definiert Spieler, Positionen, Einsatznachweise, Spiel- und Saisonstatistiken, Stints, Quellenqualität sowie Versions- und Ergebnisverträge. `src/index.ts` ist der öffentliche Einstiegspunkt. Eingaben sind typisierte, bereits normalisierte Objekte.
 - `models/qb/` prüft den Passing-Core, berechnet fünf getrennte Komponenten und kombiniert sie anhand eines explizit gewählten Modellpfads.
+- `models/positions/` enthält die übrigen 23 Positionskataloge. `calculateFieldSeasonPerformance` führt ihre Modelle durch denselben Saison-, Versions- und Kalibrierungsablauf. Die [Positionsmodelle](docs/positions.md) beschreiben die Definitionen und Grenzen.
 - `context/` injiziert eine versionierte Baseline für erwartete Passing-TDs. Sie erhält Versuche, Effizienzmerkmale und Spielkontext. Die Produktion berücksichtigt die Baseline genau einmal.
 - `confidence/` berichtet erwartete Spiele, Spiele mit geprüftem Einsatzstatus, Spiele mit vollständigem Core bei belegtem QB-Einsatz und beobachtete Passversuche. Score und Intervall bleiben mangels Kalibrierung leer. Diese Kennzahlen gehen nicht als Punktabzug in die Leistung ein.
 - `season/` prüft Saisonzugehörigkeit, Stints, erwartete Spiele, Mehrfachzählung und zeitlichen Schnitt. Je Komponente werden die Spielwerte über alle Stints mit ihrem eigenen Nenner gemittelt. Die SPR-Kalibrierung erfolgt einmal nach der gewichteten Kombination der Komponenten.
 - `overall/` schätzt latente Fähigkeit mit einem separaten, einfachen Zustandsraummodell. Es verarbeitet kompatible latente Evidenz mit expliziter Messvarianz und verwendet eine eigene Kalibrierung. Zwischen Beobachtungen wächst die simulierte Varianz bei positiver Prozessvarianz, während der Erwartungswert konstant bleibt.
+- `context/league-strength.ts` schätzt in einem expliziten Simulationspfad positionsbezogene Ligadifferenzen aus synthetischen Transfer- oder Interleague-Brücken zu einem festen Referenzwettbewerb.
 
 ## QB-Pipeline
 
@@ -51,4 +53,4 @@ Pro Komponente ist der Saisonwert das mit dem jeweiligen Nenner gewichtete Mitte
 
 ## Testabdeckung
 
-Alle Berechnungstests tragen das Präfix `SIMULATION` und verwenden künstliche Identitäten und Statistiken. Die Tests prüfen die fünf Komponenten gegen erwartete Ergebnisse, die Unterscheidung von null und fehlend, unplausible und widersprüchliche Werte, Kontextresidual, getrennte Modellpfade, Stints und Deduplizierung, Zeitgrenzen, Versionskonflikte, unkalibrierte Confidence und den eigenständigen Overall-Verlauf. Der Coverage-Befehl berichtet Zeilen-, Zweig- und Funktionsabdeckung des ausführbaren Codes.
+Alle Berechnungstests tragen das Präfix `SIMULATION` und verwenden künstliche Identitäten und Statistiken. Sie prüfen die QB-Komponenten und Sonderpfade, alle drei Varianten der übrigen 23 Positionen, fehlende oder widersprüchliche Daten, Transfers und Mehrfachpositionen, Versionskonflikte, Ligabrücken, unkalibrierte Confidence und den eigenständigen Overall-Verlauf. Der Coverage-Befehl berichtet Zeilen-, Zweig- und Funktionsabdeckung des ausführbaren Codes.

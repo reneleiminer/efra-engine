@@ -1,13 +1,15 @@
 import { summarizeConfidence } from "../confidence/evidence.ts";
+import { resolveLeagueAdjustment } from "../context/league-strength.ts";
+import type { LeagueStrengthEstimate } from "../context/league-strength.ts";
 import type { RatingReason, RatingResult } from "../contracts/rating.ts";
 import type { QbSeason } from "../contracts/statistics.ts";
-import { timestamp } from "../contracts/time.ts";
+import { compareId, validateSeasonScope } from "./scope.ts";
 import { analyzeSyntheticQbGame } from "../models/qb/components.ts";
 import { scoreQbSeason, validQbPolicy } from "../models/qb/scoring.ts";
 import type { QbSeasonSimulation } from "../models/qb/scoring.ts";
 import { calibrateSimulation } from "../simulation/calibration.ts";
 
-export function calculateSeasonPerformance(input: QbSeason, policy: QbSeasonSimulation): RatingResult {
+export function calculateSeasonPerformance(input: QbSeason, policy: QbSeasonSimulation, context?: LeagueStrengthEstimate): RatingResult {
   const { season, playerId, position, asOf, snapshot, stints } = input;
   const { origin, dataVersion, schemaVersion } = snapshot;
   const ordered = [...stints].sort((left, right) => compareId(left.id, right.id));
@@ -21,9 +23,11 @@ export function calculateSeasonPerformance(input: QbSeason, policy: QbSeasonSimu
   const blocked = (reason: RatingReason): RatingResult => ({ ...base, confidence, status: "NOT_RATED", reason, score: null });
 
   if (origin !== "SYNTHETIC") return blocked("REAL_DATA_DISABLED");
-  const scopeIssue = validateScope(input);
+  const scopeIssue = position === "QB" ? validateSeasonScope(input) : "INVALID_SCOPE";
   if (scopeIssue) return blocked(scopeIssue);
   if (!validQbPolicy(policy)) return blocked("NO_VALIDATED_MODEL_PATH");
+  const adjustment = resolveLeagueAdjustment(season.leagueId, position, asOf, policy.version, policy.leagueAdjustmentScale, context);
+  if (!adjustment) return blocked("LEAGUE_CONTEXT_UNAVAILABLE");
 
   const analyses = ordered.flatMap((stint) => [...stint.games]
     .sort((left, right) => compareId(left.gameId, right.gameId))
@@ -39,44 +43,11 @@ export function calculateSeasonPerformance(input: QbSeason, policy: QbSeasonSimu
   }
   const scored = scoreQbSeason(analyses, policy);
   if (scored.status === "NOT_RATED") return blocked(scored.reason);
-  const calibrated = calibrateSimulation(scored.value, policy.calibration);
+  const calibrated = calibrateSimulation(scored.value + adjustment.value, policy.calibration);
   if (!calibrated) return blocked("INVALID_MODEL_OUTPUT");
-  return { ...base, confidence, status: "PROVISIONAL", origin: "SYNTHETIC", label: "SIMULATION", ...calibrated };
-}
-
-function validateScope(input: QbSeason): "INVALID_SCOPE" | "INCOMPLETE_COVERAGE" | null {
-  const { asOf, season, stints, playerId, position, snapshot } = input;
-  const start = timestamp(season.startsAt);
-  const end = timestamp(season.endsAt);
-  const cutoff = timestamp(asOf);
-  const available = timestamp(snapshot.availableAt);
-  const ids = [season.id, season.leagueId, season.competitionId, playerId, snapshot.dataVersion, snapshot.schemaVersion];
-  if (position !== "QB" || ids.some((id) => !id.trim()) || ![start, end, cutoff, available].every(Number.isFinite)
-    || start > end || cutoff < start || available > cutoff) return "INVALID_SCOPE";
-
-  const stintIds = new Set<string>();
-  const seasonGameIds = new Set<string>();
-  for (const stint of stints) {
-    if (!stint.id.trim() || !stint.teamId.trim() || stintIds.has(stint.id)) return "INVALID_SCOPE";
-    stintIds.add(stint.id);
-    const pending = new Set(stint.expectedGameIds);
-    if (pending.size !== stint.expectedGameIds.length) return "INVALID_SCOPE";
-    for (const game of stint.games) {
-      const played = timestamp(game.playedAt);
-      if (!game.gameId.trim() || !game.opponentId.trim() || game.teamId === game.opponentId
-        || game.playerId !== playerId || game.position !== position || game.seasonId !== season.id
-        || game.teamId !== stint.teamId || seasonGameIds.has(game.gameId) || !Number.isFinite(played)
-        || played < start || played > end || played > available || !pending.delete(game.gameId)) {
-        return "INVALID_SCOPE";
-      }
-      seasonGameIds.add(game.gameId);
-    }
-    if (pending.size > 0) return "INCOMPLETE_COVERAGE";
-  }
-  return null;
-}
-
-function compareId(left: string, right: string): number {
-  if (left < right) return -1;
-  return left === right ? 0 : 1;
+  return {
+    ...base, confidence, ...(policy.version.comparisonScope?.basis === "BRIDGE_REFERENCE"
+      ? { leagueContextEvidenceIds: adjustment.evidenceIds } : {}),
+    status: "PROVISIONAL", origin: "SYNTHETIC", label: "SIMULATION", ...calibrated,
+  };
 }

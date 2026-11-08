@@ -1,15 +1,17 @@
 import { summarizeConfidence } from "../confidence/evidence.ts";
 import type { DataOrigin } from "../contracts/observations.ts";
 import type { ModelVersion, RatingReason, RatingResult, RatingScope } from "../contracts/rating.ts";
+import type { Position } from "../contracts/statistics.ts";
 import { timestamp } from "../contracts/time.ts";
 import { calibrateSimulation } from "../simulation/calibration.ts";
 import type { SimulationCalibration } from "../simulation/calibration.ts";
+import { describePositionModel } from "../models/positions/catalog.ts";
 
 export interface OverallEvidence {
   readonly label: "SIMULATION";
   readonly origin: "SYNTHETIC";
   readonly playerId: string;
-  readonly position: "QB";
+  readonly position: Position;
   readonly evidenceId: string;
   readonly dataVersion: string;
   readonly model: ModelVersion;
@@ -41,9 +43,10 @@ export function calculateOverall(
   });
   if (origin !== "SYNTHETIC") return blocked("REAL_DATA_DISABLED");
   const cutoff = timestamp(scope.asOf);
-  if (scope.position !== "QB" || !scope.playerId.trim() || !Number.isFinite(cutoff)) return blocked("INVALID_SCOPE");
-  if (!validSimulationVersion(policy.version) || !validSimulationVersion(policy.evidenceModel)
-    || policy.version.path !== policy.evidenceModel.path) {
+  if (!scope.playerId.trim() || !Number.isFinite(cutoff)) return blocked("INVALID_SCOPE");
+  if (!validSimulationVersion(policy.version, scope.position) || !validSimulationVersion(policy.evidenceModel, scope.position)
+    || policy.version.path !== policy.evidenceModel.path
+    || !sameComparisonScope(policy.version, policy.evidenceModel)) {
     return blocked("NO_VALIDATED_MODEL_PATH");
   }
   const drift = policy.processVariancePerDay;
@@ -95,9 +98,18 @@ export function calculateOverall(
   };
 }
 
-function validSimulationVersion(version: ModelVersion): boolean {
+function validSimulationVersion(version: ModelVersion, position: Position): boolean {
   if (version.maturity !== "UNVALIDATED_SIMULATION"
     || [version.methodVersion, version.parameterVersion, version.contextVersion].some((id) => !id.trim())) return false;
+  const comparison = version.comparisonScope;
+  if (comparison && (!comparison.leagueId.trim() || !["LEAGUE", "BRIDGE_REFERENCE"].includes(comparison.basis))) return false;
+  if (position !== "QB") {
+    const definition = describePositionModel(position);
+    return !!definition.tiers && version.fieldPosition === position && !!comparison
+      && version.featureDefinitionVersion === definition.definitionVersion
+      && (version.path === "POSITION_CORE" || version.path === "POSITION_SUPPORTING" || version.path === "POSITION_ADVANCED");
+  }
+  if (version.fieldPosition !== undefined || version.featureDefinitionVersion !== undefined) return false;
   switch (version.path) {
     case "QB_STANDARD_CORE":
       return version.firstDownDefinitionVersion === undefined && version.situationDefinitionVersion === undefined;
@@ -114,5 +126,12 @@ function sameVersion(left: ModelVersion, right: ModelVersion): boolean {
   return left.maturity === right.maturity && left.path === right.path && left.methodVersion === right.methodVersion
     && left.parameterVersion === right.parameterVersion && left.contextVersion === right.contextVersion
     && left.firstDownDefinitionVersion === right.firstDownDefinitionVersion
-    && left.situationDefinitionVersion === right.situationDefinitionVersion;
+    && left.situationDefinitionVersion === right.situationDefinitionVersion
+    && left.fieldPosition === right.fieldPosition && left.featureDefinitionVersion === right.featureDefinitionVersion
+    && sameComparisonScope(left, right);
+}
+
+function sameComparisonScope(left: ModelVersion, right: ModelVersion): boolean {
+  return left.comparisonScope?.basis === right.comparisonScope?.basis
+    && left.comparisonScope?.leagueId === right.comparisonScope?.leagueId;
 }

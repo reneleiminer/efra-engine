@@ -38,3 +38,10 @@ export type { PositionRelease, PositionReplayRequest, PositionSimulationReplay, 
 
 export type * from "./validation/contracts.ts";
 export { runSyntheticValidation, validationProtocolVersion } from "./validation/study.ts";
+
+export type * from "./validation/canonical-bridge.ts";
+export { canonicalValidationBridgeVersion, compileCanonicalValidation } from "./validation/canonical-bridge.ts";
+export type { PrivateValidationReport } from "./validation/postgres-holdout.ts";
+export {
+  PostgresValidationApprover, PostgresValidationCustodian, PostgresValidationResearcher, PostgresValidationWorker,
+} from "./validation/postgres-holdout.ts";

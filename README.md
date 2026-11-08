@@ -58,3 +58,5 @@ Alle Berechnungstests tragen das Präfix `SIMULATION` und verwenden künstliche 
 ## Modellvalidierung
 
 Das [Studienprotokoll für die Modellvalidierung](docs/model-validation.md) beschreibt versionierte Referenzpopulationen, zeitlich getrennte Stichproben, Fehlerdiagnosen für SPR, OVR und Confidence sowie offene Freigabekriterien. Der getrennte Einstiegspunkt `runSyntheticValidation` liefert ausschließlich synthetische Forschungsberichte.
+
+Die [kanonische Validierungsbrücke und Holdout-Verwaltung](docs/canonical-validation-holdout.md) verbindet synthetische kanonische Releases mit dem Studienprotokoll und dokumentiert Rechte, Prüfpfade und offene Freigabeschritte.

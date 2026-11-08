@@ -8,6 +8,14 @@ Jeder Registry-Eintrag bezeichnet Position, Feld, kanonischen Code, Einheit, zul
 
 Der Weg führt über die synthetische Quellen-Allowlist, UUID-Auflösung, Qualitätsprüfung, getrennten Review und authentifizierte Snapshot-Freigabe. Für jede numerische Beobachtung muss eine freigegebene Zuordnung aus Quelle, Mapping-, Schema-, Feld-, Konventions- und Feature-Version mit exakt der Registry-Einheit vorliegen. Die Freigabe dokumentiert die vereinbarte Normalisierung eines Felds. Die tatsächliche Einheit einer Zahl kann erst durch Prüfung des Decoders und der Quelle belegt werden. Die Projektion prüft erneut Quellenrevision, individuelle Teilnahme, UUIDs, numerische Domäne und die im Registry definierten Nenner- und Summenregeln.
 
+### Quellenfähigkeit und unabhängige Feldbelege
+
+Migration 008 erzwingt den Registry-Eintrag **source_capability**. Die getrennte Capability **EVIDENCE_ATTESTOR** bestätigt den konkreten Quellen-, Mapping- und Schemabereich mit einem Protokoll-Hash. Ein Box-Score-Nachweis berechtigt ausschließlich Box-Score-Felder. Eine Feldkonvention kann erst eingetragen werden, wenn die exakte Quellenfähigkeit und die Registry-Einheit bestätigt sind.
+
+Jede Zahl, einschließlich verifizierter Null, braucht außerdem eine Attestierung des unveränderlichen Staging-Felds. Ein Assignment-Charting-Beleg muss Spiel, Spieler, Position und Feld eindeutig benennen. Felder mit Play-by-Play und Modellreferenz brauchen beide Belegarten. Snapshot und kanonische Übernahme prüfen die Attestierung gegen den tatsächlichen Staging-Wert, die Quelle und die Feldkonvention. Belege nach dem Snapshot-Cutoff zählen für diesen Stand nicht. Importer, Reviewer und Publisher können keine Attestierung im Namen des Attestors erzeugen. Die Selbstauskunft **VERIFIED** bleibt bis dahin eine Behauptung im Staging.
+
+Die Datenbank prüft Rollen, Referenzen, Hashformat, Herkunftskette und den gebundenen Wert. Sie beurteilt nicht die fachliche Wahrheit der verlinkten Originaldatei. Attestoren müssen dafür Inhalt, Messkonvention und Rechte prüfen und die Originale unveränderlich archivieren. Test-Artefakte sind synthetisch. Datenbankadministration und Attestoren bleiben vertrauenswürdige Rollen. Vorhandene unbescheinigte Snapshot-Mitglieder oder kanonische Belege blockieren Migration 008 und erfordern einen separat geprüften Backfill.
+
 | Eingangsstatus | Behandlung |
 | --- | --- |
 | OBSERVED | Verifizierter Wert mit Quellenbeleg im Statusledger und als kanonische Beobachtung |
@@ -57,4 +65,6 @@ Die Web-Anbindung ist ein Architektur- und Sicherheitsentwurf. Wahl des IdP, kon
 
 Die fünf neuen Integrationstests prüfen den generierten Registry-Vertrag, den echten PostgreSQL-Datenweg für alle 24 Positionen samt deterministischen Simulationswiederholungen und Spezialpfade für P, LS und Rushing-only-QB. Hinzu kommen fehlende Abdeckung, getrennte Null-/Missing-/N/A-Zustände, Wiederaufnahme eines Werts nach einer Lücke, persistierte Konfliktbelege, abgewiesene Einheiten, konkurrierende Quellen und die kontrollierte Kompatibilität mit dem vorherigen QB-Pfad.
 
-Die vorhandenen Unit-, Staging-, Rollen- und Phase-10-Suiten bleiben erhalten. Migrationen 006 und 007 wurden auf einem frischen isolierten PostgreSQL-18-Testservice ausgeführt. Nutzungsrechte, Erfassungsqualität realer Quellen und empirische Modellvalidierung bleiben offen. Für diese Phase erfolgten keine Schreibzugriffe auf Neon.
+Zwei zusätzliche Negativtests prüfen eine Box-Score-Quelle mit vorgetäuschtem Charting, fehlende Einzelbelege trotz Feldfreigabe, falsche Belegart oder Spielerzuordnung, unberechtigte Attestierung und einen Beleg nach dem Cutoff.
+
+Die vorhandenen Unit-, Staging-, Rollen- und Phase-10-Suiten bleiben erhalten. Migrationen 006 bis 008 wurden auf einem frischen isolierten PostgreSQL-18-Testservice ausgeführt. Nutzungsrechte, Erfassungsqualität realer Quellen und empirische Modellvalidierung bleiben offen. Für diese Phase erfolgten keine Schreibzugriffe auf Neon.

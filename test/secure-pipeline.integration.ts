@@ -12,6 +12,8 @@ import type {
   MigrationTestTarget, Observation, Position, PositionReplayRequest, QbGame, QbSeasonSimulation, SnapshotRequest,
 } from "../src/index.ts";
 import { positionComponents } from "../src/models/positions/catalog.ts";
+import { gameObservations } from "../src/models/positions/metric-registry.ts";
+import type { SourceCapability } from "../src/models/positions/data-requirements.ts";
 import { advancedPolicy, game, policy, season, source } from "./simulation-fixtures.ts";
 
 const hosted = process.env["EFRA_NEON_TEST_DATABASE_URL"];
@@ -36,6 +38,7 @@ const actors = {
   reviewer2: { capability: "REVIEWER", group: "reviewer", active: true },
   publisher: { capability: "PUBLISHER", group: "publisher", active: true },
   projector: { capability: "PROJECTOR", group: "projector", active: true },
+  attestor: { capability: "EVIDENCE_ATTESTOR", group: "evidence_attestor", active: true },
   reader: { capability: "READER", group: "reader", active: true },
   disabled: { capability: "IMPORTER", group: "importer", active: false },
 } as const;
@@ -93,6 +96,7 @@ before(async () => {
       pools.set(key, new Pool({ connectionString: account.toString(), max: 4, connectionTimeoutMillis: 15_000 }));
     }
     await client.query("COMMIT");
+    await approveConventions("sim-uuid-map-v1");
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -193,6 +197,7 @@ test("SIMULATION | login attribution, separate publication and reproducible cano
   assert.equal(await service("reviewer2").review(reviewRequest(id)), "REVIEW_CONFLICT");
   const { rows: [identity] } = await actorPool("reviewer").query("SELECT reviewer_id, reviewer_login FROM efra_ingest.review WHERE stage_id = $1", [id]);
   assert.deepEqual(identity, { reviewer_id: "sim-subject-reviewer", reviewer_login: "efra_p10_reviewer" });
+  await attestStages([id]);
   const released = await snapshot(request.snapshotId, [id]);
   await assert.rejects(service("reviewer").release(released), { code: "42501" });
   assert.equal(await service("publisher").release(released), "CREATED");
@@ -223,6 +228,7 @@ test("SIMULATION | corrected observations supersede explicitly and overlapping s
   const [id] = await stageIds(revision);
   assert.ok(id);
   assert.equal(await service("reviewer").review(reviewRequest(id)), "REVIEWED");
+  await attestStages([id]);
   const one = await snapshot("sim-p10-corrected", [id]);
   const two = { ...one, snapshotId: "sim-p10-overlap" };
   assert.equal(await service("publisher").release(one), "CREATED");
@@ -263,6 +269,7 @@ test("SIMULATION | UUID spoofing and an unsupported later row fail without parti
   assert.equal(await writer().stage(planned), "STAGED");
   const ids = await stageIds(revision);
   for (const id of ids) assert.equal(await service("reviewer").review(reviewRequest(id)), "REVIEWED");
+  await attestStages(ids);
   const released = await snapshot("sim-p10-unsupported", ids);
   assert.equal(await service("publisher").release(released), "CREATED");
   await assert.rejects(service("projector").project(released.snapshotId, qbPassingProjection), { code: "23514" });
@@ -316,6 +323,7 @@ async function releasePosition(input: ImportManifest, candidates: readonly Impor
   assert.equal(await writer().stage(plan), "STAGED");
   const ids = await stageIds(input.sourceRevision);
   for (const id of ids) assert.equal(await service("reviewer").review(reviewRequest(id)), "REVIEWED");
+  await attestStages(ids);
   assert.equal(await service("publisher").release(await snapshot(snapshotId, ids)), "CREATED");
 }
 
@@ -342,7 +350,16 @@ function positionPolicy<P extends FieldPosition>(position: P, path: FieldPath = 
   };
 }
 
-async function approveConventions(mappingVersion: string, wrongUnitFor?: string, sourceId = uuid("01")) {
+const registryCapabilities = [...new Set(registry.metrics.map(({ sourceCapability }) => sourceCapability))];
+
+async function attestCapability(mappingVersion: string, capability: SourceCapability, sourceId = uuid("01"), actor: Actor = "attestor") {
+  await actorPool(actor).query("SELECT efra_ingest.attest_source_capability($1,$2,$3,$4,$5)",
+    [sourceId, mappingVersion, season.snapshot.schemaVersion, capability, "1".repeat(64)]);
+}
+
+async function approveConventions(mappingVersion: string, wrongUnitFor?: string, sourceId = uuid("01"),
+  capabilities: readonly SourceCapability[] = registryCapabilities) {
+  for (const capability of capabilities) await attestCapability(mappingVersion, capability, sourceId);
   await admin.query(
     `INSERT INTO efra_ingest.metric_convention
       (source_id, mapping_version, schema_version, position, field, convention_version, feature_version, unit, approved_by)
@@ -350,9 +367,34 @@ async function approveConventions(mappingVersion: string, wrongUnitFor?: string,
        CASE WHEN field LIKE 'situation.%' THEN 'sim-sacks-1' WHEN field LIKE 'advancedPassing.%' THEN 'sim-first-down-1'
          ELSE definition_version END,
        CASE WHEN field = $5 THEN 'wrong_unit' ELSE unit END, 'sim-registry-reviewer'
-     FROM efra_ingest.metric_registry WHERE storage = 'GAME'`,
-    [sourceId, mappingVersion, season.snapshot.schemaVersion, source.conventionVersion, wrongUnitFor ?? null],
+     FROM efra_ingest.metric_registry WHERE storage = 'GAME' AND source_capability = ANY($6)`,
+    [sourceId, mappingVersion, season.snapshot.schemaVersion, source.conventionVersion, wrongUnitFor ?? null, capabilities],
   );
+}
+
+function artifactsFor(game: ImportCandidate["game"], field: string, capability: SourceCapability) {
+  const kinds = capability === "PLAY_BY_PLAY_AND_MODEL" ? ["MODEL_REFERENCE", "PLAY_BY_PLAY"]
+    : [capability === "BOX_SCORE_CANDIDATE" ? "BOX_SCORE" : capability];
+  return kinds.map((kind) => ({
+    kind, field, gameId: game.gameId, playerId: game.playerId, position: game.position,
+    reference: `sim-artifact-${kind}-${field}`, sha256: "2".repeat(64),
+  }));
+}
+
+async function attestStages(ids: readonly string[], except?: string) {
+  const { rows } = await actorPool("attestor").query<{ id: string; game: ImportCandidate["game"] }>(
+    "SELECT id::text, game FROM efra_ingest.staged_game WHERE id = ANY($1::bigint[])", [ids],
+  );
+  const operations = rows.flatMap(({ id, game }) => {
+    const observations = gameObservations(game);
+    return registry.metrics.flatMap(({ position, field, storage, sourceCapability }) => {
+      const state = observations[field]?.status;
+      return position !== game.position || storage !== "GAME" || field === except || (state !== "OBSERVED" && state !== "VERIFIED_ZERO")
+        ? [] : [actorPool("attestor").query("SELECT efra_ingest.attest_position_metric($1,$2,$3::jsonb)",
+          [id, field, JSON.stringify(artifactsFor(game, field, sourceCapability))])];
+    });
+  });
+  await Promise.all(operations);
 }
 
 test("SIMULATION | SQL registry matches the 24 model contracts and all positions round-trip to reproducible ratings", async () => {
@@ -371,7 +413,6 @@ test("SIMULATION | SQL registry matches the 24 model contracts and all positions
     [uuid("01"), uuid("12"), allGame.gameId]);
   await admin.query(`INSERT INTO efra.player_appearances (game_id, player_id, team_id, position_code, snaps, exposure_quality)
     SELECT $1, $2, $3, p, 12, 'verified' FROM unnest($4::text[]) AS p`, [uuid("12"), uuid("07"), uuid("04"), allPositions]);
-  await approveConventions("sim-uuid-map-v1");
 
   await releasePosition(manifest(phase11Revision), allPositions.map((position) => position === "QB"
     ? qbPositionFixture(phase11Revision) : fieldFixture(phase11Revision, position)), allSnapshot);
@@ -471,9 +512,14 @@ test("SIMULATION | conflicts retain source evidence in quarantine, and unapprove
   assert.deepEqual(await stageIds(revision), []);
   const wrong = "sim-phase11-wrong-unit";
   const mappingVersion = "sim-unit-mismatch";
-  await approveConventions(mappingVersion, "fieldGoalAttempts");
-  await releasePosition({ ...manifest(wrong, "sim-phase11-status"), mappingVersion }, [fieldFixture(wrong, "K")], "sim-p11-wrong-unit");
-  await assert.rejects(positionPipeline("projector").project("sim-p11-wrong-unit"), /provenance, feature or unit/);
+  await assert.rejects(approveConventions(mappingVersion, "fieldGoalAttempts"), /matching unit/);
+  const wrongPlan = await resolve({ ...manifest(wrong, "sim-phase11-status"), mappingVersion }, [fieldFixture(wrong, "K")]);
+  assert.equal(await writer().stage(wrongPlan), "STAGED");
+  const [wrongId] = await stageIds(wrong);
+  assert.ok(wrongId);
+  await attestStages([wrongId]);
+  assert.equal(await service("reviewer").review(reviewRequest(wrongId)), "REVIEWED");
+  await assert.rejects(service("publisher").release(await snapshot("sim-p11-wrong-unit", [wrongId])), /independently attested evidence/);
   assert.equal(await positionPipeline("reader").readRelease("sim-p11-wrong-unit"), null);
 });
 
@@ -515,4 +561,55 @@ test("SIMULATION | a competing registered synthetic source cannot duplicate a ca
   } }], "sim-p11-competing-source");
   await assert.rejects(positionPipeline("projector").project("sim-p11-competing-source"), /requires reconciliation/);
   assert.equal(await positionPipeline("reader").readRelease("sim-p11-competing-source"), null);
+});
+
+test("SIMULATION | a box-score source cannot approve or release individually charted fields", async () => {
+  const mappingVersion = "sim-box-only";
+  await approveConventions(mappingVersion, undefined, uuid("01"), ["BOX_SCORE_CANDIDATE"]);
+  await assert.rejects(attestCapability(mappingVersion, "ASSIGNMENT_CHARTING", uuid("01"), "importer"), { code: "42501" });
+  await assert.rejects(admin.query(`INSERT INTO efra_ingest.metric_convention
+    (source_id,mapping_version,schema_version,position,field,convention_version,feature_version,unit,approved_by)
+    VALUES ($1,$2,$3,'WR','runBlockWins',$4,$5,'count','self-declared')`,
+  [uuid("01"), mappingVersion, season.snapshot.schemaVersion, source.conventionVersion, describePositionModel("WR").definitionVersion]),
+  /attested registry capability/);
+  const revision = "sim-p11-box-pretends-charting";
+  const plan = await resolve({ ...manifest(revision), mappingVersion }, [fieldFixture(revision, "WR")]);
+  assert.equal(await writer().stage(plan), "STAGED");
+  const [id] = await stageIds(revision);
+  assert.ok(id);
+  const { rows: [row] } = await actorPool("attestor").query<{ game: ImportCandidate["game"] }>(
+    "SELECT game FROM efra_ingest.staged_game WHERE id = $1", [id],
+  );
+  assert.ok(row);
+  await assert.rejects(actorPool("attestor").query("SELECT efra_ingest.attest_position_metric($1,$2,$3::jsonb)",
+    [id, "runBlockWins", JSON.stringify(artifactsFor(row.game, "runBlockWins", "ASSIGNMENT_CHARTING"))]), /Missing registry capability/);
+  assert.equal(await service("reviewer").review(reviewRequest(id)), "REVIEWED");
+  await assert.rejects(service("publisher").release(await snapshot("sim-p11-box-blocked", [id])), /independently attested evidence/);
+  assert.equal(await positionPipeline("reader").readRelease("sim-p11-box-blocked"), null);
+});
+
+test("SIMULATION | a valid mapping still requires exact per-metric evidence before the release cutoff", async () => {
+  const revision = "sim-p11-field-evidence";
+  assert.equal(await writer().stage(await resolve(manifest(revision), [qbPositionFixture(revision)])), "STAGED");
+  const [id] = await stageIds(revision);
+  assert.ok(id);
+  assert.equal(await service("reviewer").review(reviewRequest(id)), "REVIEWED");
+  const field = "situation.actualPointsAdded";
+  await attestStages([id], field);
+  const early = await snapshot("sim-p11-evidence-cutoff", [id]);
+  await assert.rejects(service("publisher").release(early), /independently attested evidence/);
+  const { rows: [row] } = await actorPool("attestor").query<{ game: ImportCandidate["game"] }>(
+    "SELECT game FROM efra_ingest.staged_game WHERE id = $1", [id],
+  );
+  assert.ok(row);
+  const evidence = artifactsFor(row.game, field, "PLAY_BY_PLAY_AND_MODEL");
+  const attest = (artifacts: unknown, actor: Actor = "attestor") => actorPool(actor).query(
+    "SELECT efra_ingest.attest_position_metric($1,$2,$3::jsonb)", [id, field, JSON.stringify(artifacts)],
+  );
+  await assert.rejects(attest(evidence, "reviewer"), { code: "42501" });
+  await assert.rejects(attest(evidence.slice(0, 1)), /does not satisfy registry capability/);
+  await assert.rejects(attest(evidence.map((artifact) => ({ ...artifact, playerId: uuid("06") }))), /exact player/);
+  await attest(evidence);
+  await assert.rejects(service("publisher").release(early), /independently attested evidence/);
+  assert.equal(await service("publisher").release(await snapshot(early.snapshotId, [id])), "CREATED");
 });

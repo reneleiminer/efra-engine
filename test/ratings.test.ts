@@ -28,7 +28,7 @@ test("SIMULATION | scores the core and advanced paths separately with traceable 
 
   const advanced = calculateSeasonPerformance(season, advancedPolicy);
   assert.equal(advanced.status, "PROVISIONAL");
-  assert.equal(advanced.latent, 1.525);
+  assert.equal(advanced.latent, 1.5375);
   const noRushing = { ...game, stats: { ...game.stats, rushing: { ...game.stats.rushing, attempts: missing } } };
   blocked(calculateSeasonPerformance(seasonWith(noRushing), advancedPolicy), "MISSING_COMPONENT");
   assert.equal(calculateSeasonPerformance(seasonWith(noRushing), policy).status, "PROVISIONAL");

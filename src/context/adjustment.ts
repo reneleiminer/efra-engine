@@ -13,20 +13,44 @@ export interface PassingContextInput {
 export interface PassingContextModel {
   readonly version: string;
   readonly expectedTouchdowns: (input: PassingContextInput) => number | null;
+  readonly nonTouchdownFirstDowns?: {
+    readonly definitionVersion: string;
+    readonly expected: (input: PassingContextInput) => number | null;
+  };
+}
+
+export interface PassingProduction {
+  readonly expectedTouchdowns: number;
+  readonly residualPerAttempt: number;
+  readonly nonTouchdownFirstDowns?: {
+    readonly expected: number;
+    readonly residualPerAttempt: number;
+  };
 }
 
 export function adjustPassingProduction(
   observed: number,
   input: PassingContextInput,
   model: PassingContextModel,
-): Evidence<{ readonly expectedTouchdowns: number; readonly residualPerAttempt: number }> {
+  firstDowns?: Evidence<number>,
+): Evidence<PassingProduction> {
   const expected = model.expectedTouchdowns(input);
   if (expected === null) return { status: "MISSING" };
   if (!Number.isFinite(expected) || expected < 0 || expected > input.attempts) {
     return { status: "INVALID" };
   }
-  return {
-    status: "AVAILABLE",
-    value: { expectedTouchdowns: expected, residualPerAttempt: (observed - expected) / input.attempts },
-  };
+  const base = { expectedTouchdowns: expected, residualPerAttempt: (observed - expected) / input.attempts };
+  if (!model.nonTouchdownFirstDowns) return { status: "AVAILABLE", value: base };
+  if (!firstDowns) return { status: "MISSING" };
+  if (firstDowns.status !== "AVAILABLE") return firstDowns;
+  const expectedFirstDowns = model.nonTouchdownFirstDowns.expected(input);
+  if (expectedFirstDowns === null) return { status: "MISSING" };
+  if (!Number.isFinite(expectedFirstDowns) || expectedFirstDowns < 0 || expectedFirstDowns > input.attempts - expected) {
+    return { status: "INVALID" };
+  }
+  return { status: "AVAILABLE", value: {
+    ...base, nonTouchdownFirstDowns: {
+      expected: expectedFirstDowns, residualPerAttempt: (firstDowns.value - expectedFirstDowns) / input.attempts,
+    },
+  } };
 }

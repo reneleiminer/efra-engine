@@ -3,7 +3,7 @@ import type { RatingReason, RatingResult } from "../contracts/rating.ts";
 import type { QbSeason } from "../contracts/statistics.ts";
 import { timestamp } from "../contracts/time.ts";
 import { analyzeSyntheticQbGame } from "../models/qb/components.ts";
-import { scoreQbComponents } from "../models/qb/scoring.ts";
+import { scoreQbSeason, validQbPolicy } from "../models/qb/scoring.ts";
 import type { QbSeasonSimulation } from "../models/qb/scoring.ts";
 import { calibrateSimulation } from "../simulation/calibration.ts";
 
@@ -23,39 +23,23 @@ export function calculateSeasonPerformance(input: QbSeason, policy: QbSeasonSimu
   if (origin !== "SYNTHETIC") return blocked("REAL_DATA_DISABLED");
   const scopeIssue = validateScope(input);
   if (scopeIssue) return blocked(scopeIssue);
-  const path = policy.version.path;
-  const advanced = path === "QB_ADVANCED";
-  if (policy.version.maturity !== "UNVALIDATED_SIMULATION" || policy.context.version !== policy.version.contextVersion
-    || (path !== "QB_STANDARD_CORE" && !advanced)
-    || advanced !== ("rushingContribution" in policy.components)
-    || advanced !== ("situationalImpact" in policy.components)
-    || [policy.version.methodVersion, policy.version.parameterVersion, policy.version.contextVersion].some((id) => !id.trim())) {
-    return blocked("NO_VALIDATED_MODEL_PATH");
-  }
+  if (!validQbPolicy(policy)) return blocked("NO_VALIDATED_MODEL_PATH");
 
-  const analyses = ordered.map((stint) => [...stint.games]
+  const analyses = ordered.flatMap((stint) => [...stint.games]
     .sort((left, right) => compareId(left.gameId, right.gameId))
     .map((game) => analyzeSyntheticQbGame(game, policy.context)));
-  confidence = summarizeConfidence(expectedGames, analyses.flatMap((stint) => stint.map(({ core }) => core)));
-  const coreIssue = analyses.flat().find(({ core }) => core.status === "UNAVAILABLE")?.core;
+  confidence = summarizeConfidence(expectedGames, analyses.map(({ core }) => core));
+  const coreIssue = analyses.find(({ core }) => core.status === "UNAVAILABLE")?.core;
   if (coreIssue?.status === "UNAVAILABLE") return blocked(coreIssue.reason);
-  if (confidence.passingAttempts === 0) return blocked("NO_PASSING_EXPOSURE");
   if (!Number.isSafeInteger(confidence.passingAttempts)) return blocked("INVALID_CORE");
-
-  let seasonLatent = 0;
-  for (const stint of analyses) {
-    const passing = stint.flatMap(({ core, components }) =>
-      core.status === "PASSING" ? [{ attempts: core.stats.attempts, components }] : []);
-    const attempts = passing.reduce((sum, game) => sum + game.attempts, 0);
-    let stintLatent = 0;
-    for (const game of passing) {
-      const scored = scoreQbComponents(game.components, policy);
-      if (scored.status === "NOT_RATED") return blocked(scored.reason);
-      stintLatent += scored.value * (game.attempts / attempts);
-    }
-    seasonLatent += stintLatent * (attempts / confidence.passingAttempts);
+  if (policy.version.path === "QB_RUSH_ONLY_SPECIAL") {
+    if (confidence.passingAttempts > 0) return blocked("PASSING_EXPOSURE_IN_RUSH_ONLY");
+  } else if (confidence.passingAttempts === 0) {
+    return blocked("NO_PASSING_EXPOSURE");
   }
-  const calibrated = calibrateSimulation(seasonLatent, policy.calibration);
+  const scored = scoreQbSeason(analyses, policy);
+  if (scored.status === "NOT_RATED") return blocked(scored.reason);
+  const calibrated = calibrateSimulation(scored.value, policy.calibration);
   if (!calibrated) return blocked("INVALID_MODEL_OUTPUT");
   return { ...base, confidence, status: "PROVISIONAL", origin: "SYNTHETIC", label: "SIMULATION", ...calibrated };
 }

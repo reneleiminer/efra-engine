@@ -21,7 +21,7 @@ Der Build erzeugt JavaScript und Typdeklarationen in `dist/`. GitHub Actions fü
 - `models/qb/` prüft den Passing-Core, berechnet fünf getrennte Komponenten und kombiniert sie anhand eines explizit gewählten Modellpfads.
 - `context/` injiziert eine versionierte Baseline für erwartete Passing-TDs. Sie erhält Versuche, Effizienzmerkmale und Spielkontext. Die Produktion berücksichtigt die Baseline genau einmal.
 - `confidence/` berichtet erwartete Spiele, Spiele mit geprüftem Einsatzstatus, Spiele mit vollständigem Core bei belegtem QB-Einsatz und beobachtete Passversuche. Score und Intervall bleiben mangels Kalibrierung leer. Diese Kennzahlen gehen nicht als Punktabzug in die Leistung ein.
-- `season/` prüft Saisonzugehörigkeit, Stints, erwartete Spiele, Mehrfachzählung und zeitlichen Schnitt. Innerhalb eines Stints und zwischen Stints dient die Passversuchsmenge als Gewicht der Simulation. Die anschließende SPR-Kalibrierung erfolgt einmal auf dem Saisonwert.
+- `season/` prüft Saisonzugehörigkeit, Stints, erwartete Spiele, Mehrfachzählung und zeitlichen Schnitt. Je Komponente werden die Spielwerte über alle Stints mit ihrem eigenen Nenner gemittelt. Die SPR-Kalibrierung erfolgt einmal nach der gewichteten Kombination der Komponenten.
 - `overall/` schätzt latente Fähigkeit mit einem separaten, einfachen Zustandsraummodell. Es verarbeitet kompatible latente Evidenz mit expliziter Messvarianz und verwendet eine eigene Kalibrierung. Zwischen Beobachtungen wächst die simulierte Varianz bei positiver Prozessvarianz, während der Erwartungswert konstant bleibt.
 
 ## QB-Pipeline
@@ -29,12 +29,17 @@ Der Build erzeugt JavaScript und Typdeklarationen in `dist/`. GitHub Actions fü
 Für den Passing-Core sind Passversuche, Completions, Passing Yards, Passing TDs und Interceptions sowie ein verifizierter QB-Einsatznachweis erforderlich. Nullwerte tragen `VERIFIED_ZERO`. Fehlende, nicht anwendbare, widersprüchliche und zu Forschungszwecken geschätzte Werte haben eigene Zustände. Bei verifizierten null Passversuchen bleiben Passing-Raten nicht anwendbar. Ein verifizierter Nicht-Einsatz ist ein eigener Zustand. Positive Passversuche allein ersetzen den Einsatznachweis nicht.
 
 1. **Passing-Effizienz** berechnet Completions und Passing Yards je Passversuch.
-2. **Passing-Produktion** berechnet beobachtete minus erwartete Passing-TDs je Passversuch.
+2. **Passing-Produktion** berechnet getrennte Residuen für Passing-TDs und in erweiterten Pfaden für First Downs aus vollständigen Pässen ohne Touchdown. Beide Referenzfunktionen erhalten Passversuche, Completion Rate, Yards pro Versuch und Spielkontext. Die Produktion verwendet Yards und Completion Rate als Prädiktoren der Baseline. TD und First Down ohne TD sind disjunkte Ereignisse.
 3. **Ballkontrolle** misst Interceptions je Passversuch. Die injizierte Bewertungsfunktion legt die Leistungsrichtung fest.
 4. **Rushing-Beitrag** erfasst Yards, TDs und Turnovers je verifiziertem QB-Run.
-5. **Situative Wirkung** bildet die Differenz aus beobachteten und erwarteten Punkten über identisch definierte situative Opportunities ab.
+5. **Situative Wirkung** bildet die Differenz aus beobachteten und erwarteten Punkten je vorab definiertem situativem QB-Sack ab. Diese Ereignisse sind aus Passversuchen und QB-Runs ausgeschlossen.
 
-`QB_STANDARD_CORE` verlangt die ersten drei Komponenten. `QB_ADVANCED` verlangt alle fünf für jedes Spiel mit Passversuchen. Die beiden Pfade erhalten eigene Parametersätze. Fehlt eine für den gewählten Pfad erforderliche Komponente, liefert die Engine `NOT_RATED`. Eine automatische Neugewichtung oder ein Wechsel des Pfads findet nicht statt. Spiele mit belegtem QB-Einsatz ohne Pässe bleiben in der Abdeckung sichtbar. Eine Saison ohne Passversuche erhält `NOT_RATED`, auch wenn QB-Runs dokumentiert sind. `QB_RUSH_ONLY_SPECIAL` ist als separater Pfad reserviert.
+- `QB_STANDARD_CORE` verwendet die ersten drei Komponenten mit TD-Residuum.
+- `QB_EXTENDED_PRODUCTION` ergänzt das First-Down-Residuum mit expliziter Definitionsversion für alle Spiele mit Passversuchen.
+- `QB_ADVANCED` erfordert zusätzlich vollständige Rushing- und versionierte situative Daten bei jedem belegten QB-Einsatz. Verifizierte null Opportunities liefern keine Beobachtung für die jeweilige Komponente. Positive Runs oder situative Opportunities zählen auch in Spielen und Stints mit null Passversuchen.
+- `QB_RUSH_ONLY_SPECIAL` besitzt ein eigenes Simulationsmodell und eine separate Kalibrierung. Es erfordert vollständigen, auf null verifizierten Passing-Core in jedem Einsatzspiel sowie vollständig belegte Rushing-Daten mit mindestens einer Opportunity. Der Pfad ist für Overall und Rankings gesperrt.
+
+Pro Komponente ist der Saisonwert das mit dem jeweiligen Nenner gewichtete Mittel der transformierten Spielwerte. Anschließend werden die für den Pfad vorgegebenen Komponenten mit festen Gewichten kombiniert. Fehlende Pflichtevidenz blockiert den Pfad. Gewichte werden weder bei Datenlücken noch bei vollständig fehlender Exposition umverteilt. Overall akzeptiert nur Evidenz mit derselben Pfad-, Methoden-, Parameter-, Kontext- und Feature-Definition wie im jeweiligen Evidenzmodell. Eine gemeinsame Skala zwischen Pfaden erfordert weiterhin unabhängige Brücken- und Ablationsanalysen.
 
 ## Annahmen und offene Kalibrierung
 

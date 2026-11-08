@@ -1,19 +1,15 @@
 import { adjustPassingProduction } from "../../context/adjustment.ts";
-import type { PassingContextModel } from "../../context/adjustment.ts";
+import type { PassingContextModel, PassingProduction } from "../../context/adjustment.ts";
 import { isCount, readObservation } from "../../contracts/observations.ts";
 import type { Evidence } from "../../contracts/observations.ts";
 import type { QbGame, QbStatistics } from "../../contracts/statistics.ts";
 import { assessQbCore } from "./core.ts";
-import type { CoreAssessment } from "./core.ts";
+import type { CoreAssessment, PassingCore } from "./core.ts";
+export type { PassingProduction } from "../../context/adjustment.ts";
 
 export interface PassingEfficiency {
   readonly completionRate: number;
   readonly yardsPerAttempt: number;
-}
-
-export interface PassingProduction {
-  readonly expectedTouchdowns: number;
-  readonly residualPerAttempt: number;
 }
 
 export interface BallControl {
@@ -43,14 +39,18 @@ export interface QbComponents {
 export interface QbGameAnalysis {
   readonly label: "SIMULATION";
   readonly gameId: string;
-  readonly contextVersion: string;
+  readonly contextVersion: string | null;
+  readonly situationDefinitionVersion: string | null;
   readonly core: CoreAssessment;
   readonly components: QbComponents;
 }
 
-export function analyzeSyntheticQbGame(game: QbGame, context: PassingContextModel): QbGameAnalysis {
+export function analyzeSyntheticQbGame(game: QbGame, context?: PassingContextModel): QbGameAnalysis {
   const core = assessQbCore(game, "SYNTHETIC");
-  const provenance = { label: "SIMULATION", gameId: game.gameId, contextVersion: context.version } as const;
+  const provenance = {
+    label: "SIMULATION", gameId: game.gameId, contextVersion: context?.version ?? null,
+    situationDefinitionVersion: game.stats.situationDefinitionVersion ?? null,
+  } as const;
   if (core.status !== "PASSING") {
     const status = core.status === "UNAVAILABLE" ? "UNUSABLE" : "NOT_APPLICABLE";
     const unavailable = { status } as const;
@@ -76,9 +76,10 @@ export function analyzeSyntheticQbGame(game: QbGame, context: PassingContextMode
     core,
     components: {
       passingEfficiency: { status: "AVAILABLE", value: efficiency },
-      passingProduction: adjustPassingProduction(
+      passingProduction: context ? adjustPassingProduction(
         touchdowns, { gameId, seasonId, teamId, opponentId, attempts, ...efficiency }, context,
-      ),
+        context.nonTouchdownFirstDowns && readFirstDowns(game.stats, core.stats, context.nonTouchdownFirstDowns.definitionVersion),
+      ) : { status: "MISSING" },
       ballControl: { status: "AVAILABLE", value: { interceptionRate: interceptions / attempts } },
       rushingContribution: rushingContribution(game.stats.rushing),
       situationalImpact: situationalImpact(game.stats.situation),
@@ -86,8 +87,17 @@ export function analyzeSyntheticQbGame(game: QbGame, context: PassingContextMode
   };
 }
 
+function readFirstDowns(stats: QbStatistics, core: PassingCore, version: string): Evidence<number> {
+  const advanced = stats.advancedPassing;
+  if (!advanced) return { status: "MISSING" };
+  if (advanced.definitionVersion !== version) return { status: "UNUSABLE" };
+  return readObservation(advanced.nonTouchdownFirstDowns, "SYNTHETIC",
+    (value) => isCount(value) && value <= core.completions - core.touchdowns);
+}
+
 function rushingContribution(rushing: QbStatistics["rushing"]): Evidence<RushingContribution> {
   const attempts = readObservation(rushing.attempts, "SYNTHETIC", isCount);
+  if (attempts.status === "NOT_APPLICABLE") return { status: "MISSING" };
   if (attempts.status !== "AVAILABLE") return attempts;
   const yards = readObservation(rushing.yards, "SYNTHETIC", Number.isSafeInteger);
   const touchdowns = readObservation(rushing.touchdowns, "SYNTHETIC", isCount);
@@ -121,6 +131,7 @@ function rushingContribution(rushing: QbStatistics["rushing"]): Evidence<Rushing
 
 function situationalImpact(situation: QbStatistics["situation"]): Evidence<SituationalImpact> {
   const opportunities = readObservation(situation.opportunities, "SYNTHETIC", isCount);
+  if (opportunities.status === "NOT_APPLICABLE") return { status: "MISSING" };
   if (opportunities.status !== "AVAILABLE") return opportunities;
   const actual = readObservation(situation.actualPointsAdded, "SYNTHETIC", Number.isFinite);
   const expected = readObservation(situation.expectedPointsAdded, "SYNTHETIC", Number.isFinite);

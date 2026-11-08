@@ -23,6 +23,8 @@ export const game = {
     },
     rushing: { attempts: observed(4), yards: observed(20), touchdowns: observed(1), turnovers: observed(0) },
     situation: { opportunities: observed(4), actualPointsAdded: observed(3), expectedPointsAdded: observed(1) },
+    advancedPassing: { definitionVersion: "sim-first-down-1", nonTouchdownFirstDowns: observed(3) },
+    situationDefinitionVersion: "sim-sacks-1",
   },
 } as const satisfies QbGame;
 
@@ -67,11 +69,21 @@ export const policy = {
 
 export const advancedPolicy = {
   ...policy,
-  version: { ...policy.version, parameterVersion: "sim-advanced-1", path: "QB_ADVANCED" },
+  version: {
+    ...policy.version, parameterVersion: "sim-advanced-2", path: "QB_ADVANCED",
+    contextVersion: "sim-extended-context-1", firstDownDefinitionVersion: "sim-first-down-1",
+    situationDefinitionVersion: "sim-sacks-1",
+  },
+  context: {
+    ...policy.context, version: "sim-extended-context-1",
+    nonTouchdownFirstDowns: { definitionVersion: "sim-first-down-1", expected: ({ attempts }) => attempts / 5 },
+  },
   components: {
     ...policy.components,
     passingEfficiency: { ...policy.components.passingEfficiency, weight: 0.25 },
-    passingProduction: { ...policy.components.passingProduction, weight: 0.125 },
+    passingProduction: {
+      weight: 0.125, score: (features) => features.residualPerAttempt + (features.nonTouchdownFirstDowns?.residualPerAttempt ?? NaN),
+    },
     ballControl: { ...policy.components.ballControl, weight: 0.125 },
     rushingContribution: { weight: 0.25, score: ({ yardsPerAttempt }) => yardsPerAttempt },
     situationalImpact: { weight: 0.25, score: ({ pointsAboveExpectationPerOpportunity }) => pointsAboveExpectationPerOpportunity },

@@ -45,7 +45,8 @@ export function exportStatisticalReadModel(input: QbStatInput, context: Statisti
 
   const { quality } = analysis;
   requirePilot(!body.includeLeaderboards || (quality.expectedGames > 0 && quality.finalGames === quality.expectedGames
-    && quality.completeCandidates === quality.expectedCandidates), "Leaderboards require complete comparison-group evidence");
+    && quality.completeCandidates === quality.expectedCandidates && quality.eligiblePlayers > 0),
+  "Leaderboards require complete comparison-group evidence and an eligible QB");
   const selectedReports = analysis.reports.filter(({ player }) => body.reportPlayerIds.includes(player.id));
   requirePilot(selectedReports.length === body.reportPlayerIds.length && selectedReports.every(({ raw, actualPosition }) =>
     raw !== null && actualPosition === "QB"), "Release includes a report without complete player evidence");

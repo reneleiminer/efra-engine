@@ -345,6 +345,12 @@ test("SIMULATION | isolated in-memory release exercise verifies rights, current 
   assert.equal(boards.status, "PUBLISHED");
   assert.equal(boards.leaderboards.length, 5);
   assert.deepEqual(boards.reports, []);
+  const noEligible = await signed("STAT_POLICY", { ...packet.policy.body, minimumAttempts: 10_000 });
+  const ineligibleInput = { ...withRights, policy: noEligible };
+  const empty = await signed("STAT_PUBLICATION", { ...leaders.body,
+    analysisSha256: calculateStatisticalSeason(ineligibleInput, licensed).analysisSha256 });
+  assert.throws(() => exportStatisticalReadModel(ineligibleInput, licensed,
+    { activeReleaseSha256: () => canonicalSha256(empty) }, empty), /an eligible QB/);
   const criteria = await signed<PassingHonorsCriteria>("STAT_POLICY", { schema: statisticalVersion, version: "sim-release-honors",
     category: "PASSING_EFFICIENCY", metric: "yardsPerAttempt", groupSha256: result.groupSha256, policySha256: result.policySha256,
     minimumAttempts: 20, status: "APPROVED", evidenceSha256: digest, tieRule: "WITHHOLD_TIED_LEAD" });

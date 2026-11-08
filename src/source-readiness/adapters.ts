@@ -130,18 +130,20 @@ export async function inspectSourceFixture(
   identity: FixtureIdentityResolver, previous?: SourceRevisionHead,
 ) {
   const scope = safeRequest(request);
-  const fixture = structuredClone(await transport.readFixture(scope)) as SourceFixtureExport;
+  const pinnedMapping = structuredClone(mapping);
+  const pinnedPrevious = structuredClone(previous);
+  const fixture = structuredClone(await transport.readFixture(structuredClone(scope))) as SourceFixtureExport;
   check(fixture?.version === sourceAdapterVersion && fixture.origin === "SYNTHETIC" && fixture.permission === "SYNTHETIC_FIXTURE"
     && canonicalSha256(fixture.request) === canonicalSha256(scope) && Number.isFinite(timestamp(fixture.playedAt))
     && ["FINAL", "PROVISIONAL"].includes(fixture.finality) && Array.isArray(fixture.rows)
     && fixture.rows.length > 0 && canonicalSha256(fixture.rows) === fixture.revision?.rowsSha256
     && isId(fixture.revision?.id) && (fixture.revision.supersedes === undefined || isId(fixture.revision.supersedes))
     && fixture.revision.id !== fixture.revision.supersedes, "Invalid or non-synthetic fixture export");
-  check(mapping.provider === scope.provider && mapping.competition === scope.competition
-    && isId(mapping.version) && isId(mapping.sourceSchemaVersion) && mapping.sourceSchemaVersion === fixture.schemaVersion,
+  check(pinnedMapping.provider === scope.provider && pinnedMapping.competition === scope.competition
+    && isId(pinnedMapping.version) && isId(pinnedMapping.sourceSchemaVersion) && pinnedMapping.sourceSchemaVersion === fixture.schemaVersion,
   "Unrecognized provider mapping version");
 
-  const mappings = Map.groupBy(mapping.bindings, ({ position }) => position);
+  const mappings = Map.groupBy(pinnedMapping.bindings, ({ position }) => position);
   for (const [position, bindings] of mappings) {
     check(new Set(bindings.map(({ field }) => field)).size === bindings.length
       && new Set(bindings.map(({ sourceField }) => sourceField)).size === bindings.length
@@ -152,12 +154,12 @@ export async function inspectSourceFixture(
   const scopeSha256 = canonicalSha256([scope.provider, scope.competition, scope.seasonKey, scope.gameKey]);
   const revision = {
     scopeSha256, revisionId: fixture.revision.id,
-    contentSha256: canonicalSha256({ scope, mapping, schemaVersion: fixture.schemaVersion, revision: fixture.revision,
+    contentSha256: canonicalSha256({ scope, mapping: pinnedMapping, schemaVersion: fixture.schemaVersion, revision: fixture.revision,
       playedAt: fixture.playedAt, finality: fixture.finality }),
   };
-  const sameRevision = previous?.revisionId === revision.revisionId;
-  check(previous ? previous.scopeSha256 === scopeSha256 && (sameRevision
-    ? previous.contentSha256 === revision.contentSha256 : fixture.revision.supersedes === previous.revisionId)
+  const sameRevision = pinnedPrevious?.revisionId === revision.revisionId;
+  check(pinnedPrevious ? pinnedPrevious.scopeSha256 === scopeSha256 && (sameRevision
+    ? pinnedPrevious.contentSha256 === revision.contentSha256 : fixture.revision.supersedes === pinnedPrevious.revisionId)
     : fixture.revision.supersedes === undefined, "Conflicting or unparented provider revision");
 
   const records = new Set<string>();
@@ -178,7 +180,7 @@ export async function inspectSourceFixture(
       && ["REPORTED_PLAYED", "REPORTED_DID_NOT_PLAY", "UNKNOWN"].includes(row.participation), "Invalid or duplicate fixture row");
     records.add(row.recordKey);
     const input = { playerKey: row.playerKey, teamKey: row.teamKey, opponentKey: row.opponentKey, position: row.position };
-    const resolved = await identity.resolve(scope, fixture.playedAt, input);
+    const resolved = structuredClone(await identity.resolve(structuredClone(scope), fixture.playedAt, structuredClone(input)));
     const identityValid = resolved && resolved.bindingSha256 === canonicalSha256([scope, fixture.playedAt, input])
       && resolved.playedAt === fixture.playedAt && resolved.position === row.position && resolved.teamId !== resolved.opponentId
       && [resolved.competitionId, resolved.seasonId, resolved.gameId, resolved.playerId, resolved.teamId, resolved.opponentId].every(isUuid);

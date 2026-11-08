@@ -24,3 +24,18 @@ CREATE TABLE efra.player_appearances (
   exposure_quality text NOT NULL CHECK (exposure_quality IN ('unknown', 'estimated', 'verified')),
   UNIQUE (game_id, player_id, team_id, position_code)
 );
+CREATE TABLE efra.import_batches (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), source_id uuid NOT NULL REFERENCES efra.data_sources,
+  started_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz,
+  status text NOT NULL CHECK (status IN ('pending', 'processing', 'validated', 'rejected', 'failed')),
+  raw_sha256 text, notes text
+);
+CREATE TABLE efra.stat_observations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), import_batch_id uuid NOT NULL REFERENCES efra.import_batches,
+  player_id uuid REFERENCES efra.players, game_id uuid REFERENCES efra.games,
+  season_id uuid REFERENCES efra.seasons, team_id uuid REFERENCES efra.teams,
+  position_code text NOT NULL, metric_code text NOT NULL, value numeric NOT NULL, exposure_unit text,
+  data_status text NOT NULL CHECK (data_status IN ('unverified', 'verified', 'under_review', 'rejected')),
+  recorded_at timestamptz NOT NULL DEFAULT now(), supersedes_id uuid REFERENCES efra.stat_observations,
+  CHECK (game_id IS NOT NULL OR team_id IS NOT NULL)
+);

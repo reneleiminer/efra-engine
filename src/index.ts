@@ -27,3 +27,7 @@ export { planImport } from "./ingest/plan.ts";
 export { PostgresImportStageStore } from "./ingest/postgres-stage-store.ts";
 export { PostgresImportIdentityResolver } from "./ingest/postgres-identity-resolver.ts";
 export { PostgresApprovedSnapshotReader } from "./ingest/postgres-snapshot-reader.ts";
+export { applyIngestTestMigrations } from "./ingest/postgres-migrations.ts";
+export type { MigrationFile, MigrationTestTarget } from "./ingest/postgres-migrations.ts";
+export { PostgresSecurePipeline, qbPassingProjection } from "./ingest/postgres-secure-pipeline.ts";
+export type { AuthenticatedReview, RatingReplayReference } from "./ingest/postgres-secure-pipeline.ts";

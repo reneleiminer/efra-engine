@@ -29,6 +29,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run build:pilot-engine
+      - run: npm run source:matrix -- --check
       - run: npm run test:coverage
 
   postgres:

@@ -31,7 +31,7 @@ export interface ImportCandidate {
 export type ImportQualityIssue =
   | "INVALID_IDENTITY_OR_SCOPE" | "DUPLICATE_RECORD" | "DUPLICATE_GAME_POSITION"
   | "UNVERIFIED_USAGE" | "UNEXPECTED_FIELD" | "FEATURE_VERSION_MISMATCH" | "SOURCE_MISMATCH"
-  | "CORE_INCOMPLETE" | "INVALID_EVIDENCE" | "UNUSABLE_EVIDENCE";
+  | "CORE_INCOMPLETE" | "INVALID_EVIDENCE" | "UNUSABLE_EVIDENCE" | "UNRESOLVED_OR_INCONSISTENT_IDENTITY";
 
 export type ImportRowDecision = {
   readonly sourceRecordId: string;
@@ -42,7 +42,7 @@ export type ImportRowDecision = {
 );
 
 export type ImportPlan =
-  | { readonly status: "BLOCKED"; readonly reason: "INVALID_MANIFEST" | "SOURCE_NOT_APPROVED" | "REAL_IMPORT_DISABLED" }
+  | { readonly status: "BLOCKED"; readonly reason: "INVALID_MANIFEST" | "SOURCE_NOT_APPROVED" | "REAL_IMPORT_DISABLED" | "UNRESOLVED_IMPORT_SCOPE" }
   | {
       readonly status: "DRY_RUN";
       readonly label: "SIMULATION";

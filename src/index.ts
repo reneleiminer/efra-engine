@@ -25,3 +25,5 @@ export { describePositionDataRequirements, positionDataAvailabilityMatrix } from
 export { estimateSyntheticLeagueStrength } from "./context/league-strength.ts";
 export { planImport } from "./ingest/plan.ts";
 export { PostgresImportStageStore } from "./ingest/postgres-stage-store.ts";
+export { PostgresImportIdentityResolver } from "./ingest/postgres-identity-resolver.ts";
+export { PostgresApprovedSnapshotReader } from "./ingest/postgres-snapshot-reader.ts";

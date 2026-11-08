@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import type { KeyObject } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { after, before, test } from "node:test";
 import { Pool } from "pg";
+import type { PoolClient } from "pg";
 import {
   applyIngestTestMigrations, describePositionModel, PostgresImportIdentityResolver, PostgresImportStageStore,
   PostgresPositionPipeline, PostgresSecurePipeline, PostgresValidationApprover, PostgresValidationCustodian,
   PostgresValidationResearcher, PostgresValidationWorker, positionMetricRegistry, positionMetricRegistryVersion, qbPassingProjection,
+  createVerifiedPilotWorker, PostgresPilotApprover, serializePilotStudyArtifacts, sha256Bytes, signPilot, verifyPilotReport,
 } from "../src/index.ts";
 import type {
   CanonicalValidationRecipe, FieldPath, FieldPosition, FieldSeasonSimulation, ImportCandidate, ImportManifest, ImportPlan, MigrationFile,
-  MigrationTestTarget, Observation, Position, PositionReplayRequest, QbGame, QbSeasonSimulation, SnapshotRequest,
+  MigrationTestTarget, Observation, PilotEngineManifest, PilotEvent, PilotKeyPurpose, PilotKeyTrust, PilotRunManifest,
+  PilotSigner, Position, PositionReplayRequest, QbGame, QbSeasonSimulation, SnapshotRequest,
 } from "../src/index.ts";
 import { positionComponents } from "../src/models/positions/catalog.ts";
 import { canonicalSha256 } from "../src/ingest/determinism.ts";
@@ -34,6 +38,12 @@ if (hosted) {
   || url.username !== "efra_test" || !url.port || url.search || url.hash) throw new Error("Expected the local test database");
 
 const admin = new Pool({ connectionString, connectionTimeoutMillis: 15_000 });
+const isolatedVaultUrl = process.env["EFRA_PILOT_VAULT_DATABASE_URL"];
+const vaultUrl = isolatedVaultUrl ? new URL(isolatedVaultUrl) : undefined;
+if (vaultUrl && (hosted || vaultUrl.protocol !== "postgresql:" || vaultUrl.hostname !== "127.0.0.1"
+  || vaultUrl.pathname !== "/efra_stage_test" || vaultUrl.username !== "efra_test" || !vaultUrl.port
+  || vaultUrl.port === url.port || vaultUrl.search || vaultUrl.hash)) throw new Error("Expected a second local test PostgreSQL instance");
+const vaultAdmin = vaultUrl ? new Pool({ connectionString: vaultUrl.toString(), connectionTimeoutMillis: 15_000 }) : undefined;
 const actors = {
   importer: { capability: "IMPORTER", group: "importer", active: true },
   reviewer: { capability: "REVIEWER", group: "reviewer", active: true },
@@ -49,6 +59,7 @@ const validationActors = {
 } as const;
 type Actor = keyof typeof actors | keyof typeof validationActors;
 const pools = new Map<Actor, Pool>();
+const vaultPools = new Map<Actor, Pool>();
 const actorPool = (actor: Actor) => {
   const pool = pools.get(actor);
   assert.ok(pool);
@@ -56,6 +67,27 @@ const actorPool = (actor: Actor) => {
 };
 const service = (actor: Actor) => new PostgresSecurePipeline(actorPool(actor));
 let migrations: readonly MigrationFile[] = [];
+
+async function configureValidationActors(client: PoolClient, endpoint: URL, destination: Map<Actor, Pool>, canonical: boolean) {
+  for (const key of Object.keys(validationActors) as (keyof typeof validationActors)[]) {
+    const group = validationActors[key];
+    const login = canonical ? `efra_p13_${key}` : `efra_vault_p13_${key}`;
+    const password = randomBytes(32).toString("hex");
+    await client.query(`CREATE ROLE ${login} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '${password}'`);
+    await client.query(`GRANT efra_validation_${group} TO ${login} WITH INHERIT TRUE, SET FALSE`);
+    await client.query(`INSERT INTO efra_validation.principal (login, login_oid, subject, capability)
+      SELECT rolname, oid, $2, $3 FROM pg_catalog.pg_roles WHERE rolname = $1`, [login, `sim-validation-${key}`, group]);
+    if (canonical && key === "custodian") {
+      await client.query(`GRANT efra_ingest_reader TO ${login} WITH INHERIT TRUE, SET FALSE`);
+      await client.query(`INSERT INTO efra_ingest.authenticated_principal (login_role, login_oid, subject_id, capability)
+        SELECT rolname, oid, 'sim-validation-custodian', 'READER' FROM pg_catalog.pg_roles WHERE rolname = $1`, [login]);
+    }
+    const account = new URL(endpoint);
+    account.username = login;
+    account.password = password;
+    destination.set(key, new Pool({ connectionString: account.toString(), max: 4, connectionTimeoutMillis: 15_000 }));
+  }
+}
 
 before(async () => {
   const { rows: [server] } = await admin.query<{ branch: string | null; database: string; login: string; fresh: boolean }>(
@@ -100,24 +132,7 @@ before(async () => {
       account.password = password;
       pools.set(key, new Pool({ connectionString: account.toString(), max: 4, connectionTimeoutMillis: 15_000 }));
     }
-    for (const key of Object.keys(validationActors) as (keyof typeof validationActors)[]) {
-      const group = validationActors[key];
-      const login = `efra_p13_${key}`;
-      const password = randomBytes(32).toString("hex");
-      await client.query(`CREATE ROLE ${login} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '${password}'`);
-      await client.query(`GRANT efra_validation_${group} TO ${login} WITH INHERIT TRUE, SET FALSE`);
-      await client.query(`INSERT INTO efra_validation.principal (login, login_oid, subject, capability)
-        SELECT rolname, oid, $2, $3 FROM pg_catalog.pg_roles WHERE rolname = $1`, [login, `sim-validation-${key}`, group]);
-      if (key === "custodian") {
-        await client.query(`GRANT efra_ingest_reader TO ${login} WITH INHERIT TRUE, SET FALSE`);
-        await client.query(`INSERT INTO efra_ingest.authenticated_principal (login_role, login_oid, subject_id, capability)
-          SELECT rolname, oid, 'sim-validation-custodian', 'READER' FROM pg_catalog.pg_roles WHERE rolname = $1`, [login]);
-      }
-      const account = new URL(url);
-      account.username = login;
-      account.password = password;
-      pools.set(key, new Pool({ connectionString: account.toString(), max: 4, connectionTimeoutMillis: 15_000 }));
-    }
+    await configureValidationActors(client, url, pools, true);
     await client.query("COMMIT");
     await approveConventions("sim-uuid-map-v1");
   } catch (error) {
@@ -126,8 +141,20 @@ before(async () => {
   } finally {
     client.release();
   }
+  if (vaultAdmin && vaultUrl) {
+    const { rows: [server] } = await vaultAdmin.query<{ safe: boolean }>(
+      "SELECT to_regnamespace('efra') IS NULL AND current_database() = 'efra_stage_test' AND session_user = 'efra_test'"
+      + " AND nullif(current_setting('neon.branch_id', true),'') IS NULL AS safe",
+    );
+    assert.ok(server?.safe);
+    await vaultAdmin.query(await readFile(new URL("fixtures/efra-schema.sql", import.meta.url), "utf8"));
+    await applyIngestTestMigrations(vaultAdmin, { kind: "LOCAL_TEST" }, migrations);
+    const vaultClient = await vaultAdmin.connect();
+    try { await configureValidationActors(vaultClient, vaultUrl, vaultPools, false); }
+    finally { vaultClient.release(); }
+  }
 });
-after(async () => { await Promise.all([admin.end(), ...[...pools.values()].map((pool) => pool.end())]); });
+after(async () => { await Promise.all([admin.end(), vaultAdmin?.end(), ...[...pools.values(), ...vaultPools.values()].map((pool) => pool.end())]); });
 
 const uuid = (suffix: string) => `00000000-0000-4000-8000-0000000000${suffix}`;
 const writer = () => new PostgresImportStageStore(actorPool("importer"));
@@ -637,10 +664,7 @@ test("SIMULATION | a valid mapping still requires exact per-metric evidence befo
   assert.equal(await service("publisher").release(await snapshot(early.snapshotId, [id])), "CREATED");
 });
 
-test("SIMULATION | canonical import to independent holdout, private review, and exact audited replay", async () => {
-  const gameIds = [uuid("21"), uuid("22"), uuid("23")];
-  const engine = canonicalSha256("SIMULATION phase 13 worker");
-  const model = canonicalSha256("SIMULATION phase 13 model");
+async function holdoutFixture(gameIds: readonly string[], tag: string, engine: string, model: string) {
   const custodian = new PostgresValidationCustodian(actorPool("custodian"));
   const entries: CanonicalValidationRecipe["entries"][number][] = [];
   const cohort = {
@@ -651,9 +675,9 @@ test("SIMULATION | canonical import to independent holdout, private review, and 
   } as const;
   for (const [index, gameId] of gameIds.entries()) {
     const suffix = String(index);
-    const snapshotId = "sim-p13-snapshot-" + suffix;
-    const revision = "sim-p13-revision-" + suffix;
-    const externalGame = "sim-p13-game-" + suffix;
+    const snapshotId = tag + "-snapshot-" + suffix;
+    const revision = tag + "-revision-" + suffix;
+    const externalGame = tag + "-game-" + suffix;
     const candidate = fixture(revision, 80 + index * 20);
     await admin.query("INSERT INTO efra.games (id,season_id,kickoff_at,home_team_id,away_team_id,status) VALUES ($1,$2,$3,$4,$5,'final')",
       [gameId, uuid("03"), game.playedAt, uuid("04"), uuid("05")]);
@@ -666,24 +690,24 @@ test("SIMULATION | canonical import to independent holdout, private review, and 
     const at = await custodian.observeRelease(snapshotId);
     assert.ok(at);
     assert.equal(await custodian.observeRelease(snapshotId), at);
-    entries.push({ id: "sim-p13-sample-" + suffix, snapshotId, populationId: cohort.id, playerId: uuid("07"),
-      stintId: "sim-p13-stint-" + suffix, clusterId: "sim-p13-cluster-" + suffix,
+    entries.push({ id: tag + "-sample-" + suffix, snapshotId, populationId: cohort.id, playerId: uuid("07"),
+      stintId: tag + "-stint-" + suffix, clusterId: tag + "-cluster-" + suffix,
       predictedAt: at, expectedGames: [{ gameId, teamId: uuid("04") }],
       policyFields: { "context.expectedTouchdowns": {
-        availableAt: at, evidenceIds: ["sim-p13-baseline-" + suffix],
+        availableAt: at, evidenceIds: [tag + "-baseline-" + suffix],
         observation: { status: "OBSERVED", value: 1, source },
       } },
       features: { main: { kind: "CANONICAL_METRIC", field: "passing.yards", offset: 0, scale: 0.5 } },
-      target: { eventAt: game.playedAt, availableAt: at, value: 40 + index * 10, evidenceIds: ["sim-p13-outcome-" + suffix],
-        artifactSha256: canonicalSha256(["SIMULATION independent SPR target", suffix]) },
+      target: { eventAt: game.playedAt, availableAt: at, value: 40 + index * 10, evidenceIds: [tag + "-outcome-" + suffix],
+        artifactSha256: canonicalSha256(["SIMULATION independent SPR target", tag, suffix]) },
     });
   }
   const [train, validation, holdout] = entries;
   const end = new Date(Date.parse(holdout!.predictedAt) + 100).toISOString();
   const recipe: CanonicalValidationRecipe = { engineArtifactSha256: engine, modelArtifactSha256: model, entries,
-    header: { product: "SPR", candidates: [{ id: "sim-p13-model", weights: { main: 1 } }], sensitivity: [],
-      populations: [cohort], plan: { origin: "SYNTHETIC", version: "sim-p13-plan", dataVersion: "sim-p13-data",
-        modelVersion: "sim-p13-model", registryVersion: positionMetricRegistryVersion, position: "QB", pathId: "QB_STANDARD_CORE",
+    header: { product: "SPR", candidates: [{ id: tag + "-model", weights: { main: 1 } }], sensitivity: [],
+      populations: [cohort], plan: { origin: "SYNTHETIC", version: tag + "-plan", dataVersion: tag + "-data",
+        modelVersion: tag + "-model", registryVersion: positionMetricRegistryVersion, position: "QB", pathId: "QB_STANDARD_CORE",
         windows: { train: { start: train!.predictedAt, end: validation!.predictedAt },
           validation: { start: validation!.predictedAt, end: holdout!.predictedAt }, test: { start: holdout!.predictedAt, end } },
         frozenAt: end, outcome: { kind: "SEASON_REFERENCE", definitionVersion: "sim-p13-spr-reference" },
@@ -692,6 +716,14 @@ test("SIMULATION | canonical import to independent holdout, private review, and 
       },
     },
   };
+  return { recipe, custodian, train, validation, holdout };
+}
+
+test("SIMULATION | canonical import to independent holdout, private review, and exact audited replay", async () => {
+  const gameIds = [uuid("21"), uuid("22"), uuid("23")];
+  const engine = canonicalSha256("SIMULATION phase 13 worker");
+  const model = canonicalSha256("SIMULATION phase 13 model");
+  const { recipe, custodian, train, validation, holdout } = await holdoutFixture(gameIds, "sim-p13", engine, model);
   const researcher = new PostgresValidationResearcher(actorPool("researcher"));
   const approver = new PostgresValidationApprover(actorPool("approver"));
   const worker = new PostgresValidationWorker(actorPool("worker"), engine);
@@ -799,4 +831,116 @@ test("SIMULATION | canonical import to independent holdout, private review, and 
     + " NOT EXISTS (SELECT FROM efra_validation.evaluation WHERE dataset_id=$2) AS absent", [gameIds, copy],
   );
   assert.deepEqual(state, { count: 36, absent: true });
+});
+
+test("SIMULATION | pilot locks the measured bundle and signed report across a committed-response outage", async () => {
+  const pilotPool = (actor: Actor) => vaultPools.get(actor) ?? actorPool(actor);
+  const environment = "sim-pilot";
+  const keys = new Map<PilotKeyPurpose, { readonly publicKey: KeyObject; readonly privateKey: KeyObject }>();
+  const purposes = ["ENGINE", "RUN", "REPORT"] as const;
+  for (const purpose of purposes) keys.set(purpose, generateKeyPairSync("ed25519"));
+  const trust: PilotKeyTrust = { publicKey: (scope, purpose, id) =>
+    scope === environment && id === purpose ? keys.get(purpose)?.publicKey : undefined };
+  const signer = (purpose: typeof purposes[number]): PilotSigner => {
+    const key = keys.get(purpose)!;
+    return { keyId: purpose, sign: async (message) => sign(null, message, key.privateKey) };
+  };
+  const events: PilotEvent[] = [];
+  const monitor = { record: (event: PilotEvent) => { events.push(event); } };
+  const engineBytes = await readFile(new URL("../dist/pilot-engine.mjs", import.meta.url));
+  const engine = sha256Bytes(engineBytes);
+  const engineBody: PilotEngineManifest = { version: "efra-pilot-engine-v1", sourceCommit: "c".repeat(40),
+    engineSha256: engine, protocolVersion: "efra-synthetic-validation-v1" };
+  const engineManifest = await signPilot(environment, "ENGINE", engineBody, signer("ENGINE"));
+  const base = await holdoutFixture([uuid("41"), uuid("42"), uuid("43")], "sim-p14", engine, "a".repeat(64));
+  const artifacts = serializePilotStudyArtifacts({ ...base.recipe.header, samples: [] });
+  const modelSha256 = sha256Bytes(artifacts.model);
+  const dataset = "sim-p14-dataset";
+  const runId = uuid("44");
+  const custody = new PostgresValidationCustodian(actorPool("custodian"), pilotPool("custodian"));
+  const { datasetSha256 } = await custody.seal(dataset, "sim-validation-researcher", { ...base.recipe, modelArtifactSha256: modelSha256 });
+  if (vaultAdmin) {
+    const { rows: [vaultState] } = await vaultAdmin.query<{ canonicalEmpty: boolean }>(
+      'SELECT NOT EXISTS(SELECT FROM efra.stat_observations) AS "canonicalEmpty"',
+    );
+    const { rows: [canonicalState] } = await admin.query<{ absent: boolean }>(
+      "SELECT NOT EXISTS(SELECT FROM efra_validation.dataset WHERE id=$1) AS absent", [dataset],
+    );
+    assert.ok(vaultState?.canonicalEmpty && canonicalState?.absent);
+  }
+  const now = Date.now();
+  const body: PilotRunManifest = {
+    version: "efra-pilot-run-v1", mode: "SYNTHETIC_ONLY", datasetId: dataset, runId, datasetSha256,
+    engineSha256: engine, modelSha256, configurationSha256: sha256Bytes(artifacts.configuration), reportKeyId: "REPORT",
+    issuedAt: new Date(now - 10).toISOString(), expiresAt: new Date(now + 60_000).toISOString(),
+  };
+  const authorization = await signPilot(environment, "RUN", body, signer("RUN"));
+  const db = pilotPool("worker");
+  const options = { environment, db, engineBytes, engineManifest, trust, reportSigner: signer("REPORT"), monitor, now: () => now };
+  await assert.rejects(createVerifiedPilotWorker({ ...options, engineBytes: Buffer.concat([engineBytes, Buffer.from("// changed")]) }),
+    /build digest/);
+  const worker = await createVerifiedPilotWorker(options);
+  assert.deepEqual(worker.readiness(), { mode: "SYNTHETIC_ONLY", ready: true });
+  const approver = new PostgresValidationApprover(pilotPool("approver"));
+  const pilotApprover = new PostgresPilotApprover(environment, pilotPool("approver"), trust, () => now);
+  await assert.rejects(pilotApprover.register(authorization), { code: "42501" });
+  await approver.reviewManifest(dataset);
+  await approver.approve(dataset, datasetSha256, "SIMULATION pilot approval");
+  await assert.rejects(worker.evaluate(dataset, runId, authorization, artifacts), { failure: "ACCESS_DENIED" });
+  assert.equal(await pilotApprover.register(authorization), "REGISTERED");
+  assert.equal(await pilotApprover.register(authorization), "ALREADY_REGISTERED");
+  await assert.rejects(new PostgresValidationWorker(db, engine).evaluate(dataset, runId), { code: "42501" });
+  await assert.rejects(db.query("SELECT efra_validation.claim_evaluation_internal($1,$2,$3)", [dataset, runId, engine]), { code: "42501" });
+  const otherRun = await signPilot(environment, "RUN", { ...body, runId: uuid("45") }, signer("RUN"));
+  await assert.rejects(pilotApprover.register(otherRun), { code: "23514" });
+  await assert.rejects(worker.evaluate(dataset, otherRun.body.runId, otherRun, artifacts), { failure: "ACCESS_DENIED" });
+  await assert.rejects(worker.evaluate(dataset, runId, authorization, { ...artifacts, model: Buffer.from("changed") }),
+    { failure: "INTEGRITY_OR_EXECUTION" });
+  await assert.rejects(worker.evaluate(dataset, runId, authorization, { ...artifacts, configuration: Buffer.from("changed") }),
+    { failure: "INTEGRITY_OR_EXECUTION" });
+  await assert.rejects(worker.evaluate(dataset, runId, { ...authorization, body: { ...body, reportKeyId: "forged" } }, artifacts),
+    { failure: "INTEGRITY_OR_EXECUTION" });
+
+  const { rows: [testClaim] } = await db.query<{ ticket: string }>(
+    "SELECT efra_validation.claim_pilot_evaluation($1,$2,$3,$4,$5) AS ticket",
+    [dataset, runId, engine, datasetSha256, canonicalSha256(body)],
+  );
+  await db.query("SELECT efra_validation.read_evaluation($1)", [testClaim!.ticket]);
+  const unsigned = { datasetSha256, modelArtifactSha256: modelSha256, engineArtifactSha256: engine,
+    result: { label: "SIMULATION", officialEligible: false, empiricalValidation: false } };
+  await assert.rejects(db.query("SELECT efra_validation.record_report($1,$2,$3::jsonb)", [dataset, runId, unsigned]), { code: "23514" });
+
+  let lost = false;
+  const interrupted = { query: async (sql: string, values: unknown[]) => {
+    const result = await db.query(sql, values);
+    if (!lost && sql.includes("record_report") && values.length === 3) {
+      lost = true;
+      throw Object.assign(new Error("private test fixture string"), { code: "ECONNRESET" });
+    }
+    return result;
+  } } as unknown as Pick<Pool, "query">;
+  const faultyWorker = await createVerifiedPilotWorker({ ...options, db: interrupted });
+  await assert.rejects(faultyWorker.evaluate(dataset, runId, authorization, artifacts), { failure: "TRANSIENT_STORAGE" });
+  assert.ok(lost);
+  const receipts = await Promise.all([
+    worker.evaluate(dataset, runId, authorization, artifacts), worker.evaluate(dataset, runId, authorization, artifacts),
+  ]);
+  assert.deepEqual(receipts, Array(2).fill({ label: "SIMULATION", officialEligible: false, datasetSha256 }));
+  const ticket = await approver.requestPrivateReport(dataset);
+  const recipient = "sim-validation-approver";
+  await assert.rejects(new PostgresValidationWorker(db, engine).readPrivateReport(ticket, recipient), { code: "42501" });
+  await assert.rejects(db.query("SELECT efra_validation.read_report_internal($1,$2)", [ticket, recipient]), { code: "42501" });
+  await assert.rejects(worker.readReport(ticket, recipient, otherRun), { failure: "ACCESS_DENIED" });
+  const report = await worker.readReport(ticket, recipient, authorization);
+  assert.equal(report.result.empiricalValidation, false);
+  assert.equal(report.result.test.count, 1);
+  assert.throws(() => verifyPilotReport(environment, { ...report, bridgeExclusions: [{ id: "changed", partition: "test", issues: [] }] },
+    authorization, trust), /does not match/);
+  assert.throws(() => verifyPilotReport(environment, report, otherRun, trust), /does not match/);
+  keys.delete("RUN");
+  await assert.rejects(worker.evaluate(dataset, runId, authorization, artifacts), { failure: "INTEGRITY_OR_EXECUTION" });
+  keys.delete("REPORT");
+  assert.deepEqual(worker.readiness(), { mode: "SYNTHETIC_ONLY", ready: false });
+  assert.ok(events.some((event) => event.failure === "TRANSIENT_STORAGE" && event.runId === runId));
+  assert.ok(!JSON.stringify(events).includes("private test fixture string"));
 });

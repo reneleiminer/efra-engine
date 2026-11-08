@@ -19,6 +19,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: npm run build:pilot-engine
       - run: npm run test:coverage
 
   postgres:
@@ -42,6 +43,19 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      vault:
+        image: ${{ matrix.suite == 'secure-pipeline' && 'postgres:18' || '' }}
+        env:
+          POSTGRES_USER: efra_test
+          POSTGRES_PASSWORD: efra_test
+          POSTGRES_DB: efra_stage_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U efra_test -d efra_stage_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -52,3 +66,4 @@ jobs:
       - run: npm run test:${{ matrix.suite }}
         env:
           EFRA_TEST_DATABASE_URL: postgresql://efra_test:efra_test@127.0.0.1:${{ job.services.postgres.ports[5432] }}/efra_stage_test
+          EFRA_PILOT_VAULT_DATABASE_URL: ${{ matrix.suite == 'secure-pipeline' && format('postgresql://efra_test:efra_test@127.0.0.1:{0}/efra_stage_test', job.services.vault.ports[5432]) || '' }}

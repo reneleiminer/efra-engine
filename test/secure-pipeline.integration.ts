@@ -5,10 +5,14 @@ import { after, before, test } from "node:test";
 import { Pool } from "pg";
 import {
   applyIngestTestMigrations, describePositionModel, PostgresImportIdentityResolver, PostgresImportStageStore,
-  PostgresSecurePipeline, qbPassingProjection,
+  PostgresPositionPipeline, PostgresSecurePipeline, positionMetricRegistry, qbPassingProjection,
 } from "../src/index.ts";
-import type { ImportCandidate, ImportManifest, ImportPlan, MigrationFile, MigrationTestTarget, Observation, SnapshotRequest } from "../src/index.ts";
-import { game, season, source } from "./simulation-fixtures.ts";
+import type {
+  FieldPath, FieldPosition, FieldSeasonSimulation, ImportCandidate, ImportManifest, ImportPlan, MigrationFile,
+  MigrationTestTarget, Observation, Position, PositionReplayRequest, QbGame, QbSeasonSimulation, SnapshotRequest,
+} from "../src/index.ts";
+import { positionComponents } from "../src/models/positions/catalog.ts";
+import { advancedPolicy, game, policy, season, source } from "./simulation-fixtures.ts";
 
 const hosted = process.env["EFRA_NEON_TEST_DATABASE_URL"];
 const connectionString = hosted ?? process.env["EFRA_TEST_DATABASE_URL"];
@@ -111,7 +115,8 @@ function fixture(revision: string, yards = 80, transfer = false): ImportCandidat
       ...(transfer ? { gameId: "sim-game-transfer", teamId: "sim-team-c", opponentId: "sim-team-b", playedAt: "2025-01-12T00:00:00.000Z" } : {}),
       stats: { passing: { attempts: obs(10), completions: obs(6), yards: obs(yards), touchdowns: obs(2), interceptions: obs(0) },
         rushing: { attempts: obs(0), yards: obs(0), touchdowns: obs(0), turnovers: obs(0) },
-        situation: { opportunities: obs(0), actualPointsAdded: obs(0), expectedPointsAdded: obs(0) } },
+        situation: { opportunities: obs(0), actualPointsAdded: obs(0), expectedPointsAdded: obs(0) },
+        situationDefinitionVersion: "sim-sacks-1" },
     },
   };
 }
@@ -156,7 +161,8 @@ test("SIMULATION | migration journal verifies checksums, serializes replays and 
   await assert.rejects(applyIngestTestMigrations(admin, target, [{ ...first, sql: first.sql + "\n-- tampered" }, ...rest]), /integrity mismatch/);
   await assert.rejects(applyIngestTestMigrations(admin, target, migrations.slice(0, -1)), /integrity mismatch/);
   await assert.rejects(applyIngestTestMigrations(admin, target, [...migrations, {
-    name: "006_failed.sql", sql: "CREATE TABLE efra_ingest.failed_probe (id int); SELECT 1 / 0;",
+    name: `${String(migrations.length + 1).padStart(3, "0")}_failed.sql`,
+    sql: "CREATE TABLE efra_ingest.failed_probe (id int); SELECT 1 / 0;",
   }]), { code: "22012" });
   const { rows: [state] } = await admin.query<{ count: number; absent: boolean }>(
     "SELECT count(*)::int AS count, to_regclass('efra_ingest.failed_probe') IS NULL AS absent FROM efra_migrations.journal",
@@ -263,4 +269,250 @@ test("SIMULATION | UUID spoofing and an unsupported later row fail without parti
   assert.equal(await service("reader").ratingReplayReference(released.snapshotId, "a".repeat(40), "b".repeat(64)), null);
   const { rows: [count] } = await admin.query<{ total: number }>("SELECT count(*)::int AS total FROM efra.stat_observations");
   assert.equal(count?.total, 10);
+});
+
+const registry = positionMetricRegistry();
+const allPositions = [...new Set(registry.metrics.map(({ position }) => position))];
+const phase11Revision = "sim-phase11-all-positions";
+const allSnapshot = "sim-p11-all-positions";
+const allGame = { gameId: "sim-game-all-positions", playedAt: "2025-01-14T00:00:00.000Z" };
+const absent = { status: "MISSING" } as const;
+const na = { status: "NOT_APPLICABLE" } as const;
+const positionPipeline = (actor: Actor) => new PostgresPositionPipeline(actorPool(actor));
+
+function positionObs(revision: string, value: number, conventionVersion = source.conventionVersion): Observation {
+  return { status: value === 0 ? "VERIFIED_ZERO" : "OBSERVED", value, source: { ...source, revisionId: revision, conventionVersion } };
+}
+
+function fieldFixture(revision: string, position: FieldPosition, changes: Record<string, Observation> = {}): ImportCandidate {
+  const fields = Object.fromEntries(registry.metrics.filter((metric) => metric.position === position && metric.storage === "GAME")
+    .map((metric) => [metric.field, positionObs(revision,
+      metric.roles.includes("NUMERATOR") ? metric.unit === "seconds" ? 2.4 : 4
+        : metric.roles.includes("REFERENCE") ? 2.75 : 10)]));
+  return { sourceRecordId: `sim-position-${position}`, game: {
+    ...game, ...allGame, position, usage: { status: "PLAYED", source: { ...source, revisionId: revision } },
+    stats: { definitionVersion: describePositionModel(position).definitionVersion, observations: { ...fields, ...changes } },
+  } };
+}
+
+function qbPositionFixture(revision: string, zeroPassing = false): ImportCandidate {
+  const current = fixture(revision).game;
+  assert.equal(current.position, "QB");
+  const value = (number: number) => positionObs(revision, number);
+  const zeroCore = Object.fromEntries(Object.keys(current.stats.passing).map((key) => [key, value(0)])) as QbGame["stats"]["passing"];
+  return { sourceRecordId: "sim-position-QB", game: {
+    ...current, ...allGame, stats: {
+      ...current.stats, passing: zeroPassing ? zeroCore : current.stats.passing,
+      rushing: { attempts: value(4), yards: value(20), touchdowns: value(1), turnovers: value(0) },
+      situation: { opportunities: value(3), actualPointsAdded: value(-0.4), expectedPointsAdded: value(0.6) },
+      advancedPassing: { definitionVersion: "sim-first-down-1", nonTouchdownFirstDowns: value(zeroPassing ? 0 : 3) },
+    },
+  } };
+}
+
+async function releasePosition(input: ImportManifest, candidates: readonly ImportCandidate[], snapshotId: string) {
+  const plan = await resolve(input, candidates);
+  assert.ok(plan.rows.every(({ status }) => status === "STAGE"));
+  assert.equal(await writer().stage(plan), "STAGED");
+  const ids = await stageIds(input.sourceRevision);
+  for (const id of ids) assert.equal(await service("reviewer").review(reviewRequest(id)), "REVIEWED");
+  assert.equal(await service("publisher").release(await snapshot(snapshotId, ids)), "CREATED");
+}
+
+function replayRequest<P extends Position>(position: P): PositionReplayRequest<P> {
+  return {
+    playerId: uuid("07"), position, season: { ...season.season, id: uuid("03"), competitionId: uuid("02"), leagueId: uuid("02") },
+    stints: [{ id: "sim-p11-stint", teamId: uuid("04"), expectedGameIds: [uuid("12")] }],
+    engineCommit: "a".repeat(40), configurationSha256: "b".repeat(64),
+  };
+}
+
+function positionPolicy<P extends FieldPosition>(position: P, path: FieldPath = "POSITION_ADVANCED"): FieldSeasonSimulation<P> {
+  const model = describePositionModel(position);
+  const components = positionComponents(model.tiers, path);
+  return {
+    version: {
+      ...policy.version, path, fieldPosition: position, featureDefinitionVersion: model.definitionVersion,
+      comparisonScope: { basis: "LEAGUE", leagueId: uuid("02") },
+    },
+    components: Object.fromEntries(components.map(({ id }) => [
+      id, { center: 0, scale: 1, weight: 1 / components.length },
+    ])) as FieldSeasonSimulation<P>["components"],
+    calibration: policy.calibration,
+  };
+}
+
+async function approveConventions(mappingVersion: string, wrongUnitFor?: string, sourceId = uuid("01")) {
+  await admin.query(
+    `INSERT INTO efra_ingest.metric_convention
+      (source_id, mapping_version, schema_version, position, field, convention_version, feature_version, unit, approved_by)
+     SELECT $1, $2, $3, position, field, $4,
+       CASE WHEN field LIKE 'situation.%' THEN 'sim-sacks-1' WHEN field LIKE 'advancedPassing.%' THEN 'sim-first-down-1'
+         ELSE definition_version END,
+       CASE WHEN field = $5 THEN 'wrong_unit' ELSE unit END, 'sim-registry-reviewer'
+     FROM efra_ingest.metric_registry WHERE storage = 'GAME'`,
+    [sourceId, mappingVersion, season.snapshot.schemaVersion, source.conventionVersion, wrongUnitFor ?? null],
+  );
+}
+
+test("SIMULATION | SQL registry matches the 24 model contracts and all positions round-trip to reproducible ratings", async () => {
+  assert.equal(allPositions.length, 24);
+  const { rows: metrics } = await admin.query(`SELECT position, field, code, unit, domain, tiers, roles,
+    source_capability AS "sourceCapability", storage, definition_version AS "definitionVersion"
+    FROM efra_ingest.metric_registry ORDER BY position COLLATE "C", field COLLATE "C"`);
+  assert.deepEqual(metrics, registry.metrics);
+  const { rows: rules } = await admin.query(`SELECT position, upper_field AS upper, fields, kind FROM efra_ingest.metric_rule`);
+  assert.equal(rules.length, registry.rules.length);
+  for (const rule of registry.rules) assert.ok(rules.some((row) => row.position === rule.position && row.upper === rule.upper
+    && row.kind === rule.kind && JSON.stringify(row.fields) === JSON.stringify(rule.fields)));
+  await admin.query(`INSERT INTO efra.games (id, season_id, kickoff_at, home_team_id, away_team_id, status)
+    VALUES ($1, $2, $3, $4, $5, 'final')`, [uuid("12"), uuid("03"), allGame.playedAt, uuid("04"), uuid("05")]);
+  await admin.query(`INSERT INTO efra.external_ids (source_id, entity_type, entity_id, external_key) VALUES ($1, 'game', $2, $3)`,
+    [uuid("01"), uuid("12"), allGame.gameId]);
+  await admin.query(`INSERT INTO efra.player_appearances (game_id, player_id, team_id, position_code, snaps, exposure_quality)
+    SELECT $1, $2, $3, p, 12, 'verified' FROM unnest($4::text[]) AS p`, [uuid("12"), uuid("07"), uuid("04"), allPositions]);
+  await approveConventions("sim-uuid-map-v1");
+
+  await releasePosition(manifest(phase11Revision), allPositions.map((position) => position === "QB"
+    ? qbPositionFixture(phase11Revision) : fieldFixture(phase11Revision, position)), allSnapshot);
+  assert.deepEqual((await Promise.all([positionPipeline("projector").project(allSnapshot),
+    positionPipeline("projector").project(allSnapshot)])).sort(), ["ALREADY_PROJECTED", "PROJECTED"]);
+  const result = await positionPipeline("reader").readRelease(allSnapshot);
+  assert.ok(result);
+  assert.equal(result.snapshot.games.length, 24);
+  assert.equal(result.facts.length, registry.metrics.filter(({ storage }) => storage === "GAME").length);
+  assert.ok(result.facts.every(({ observationId }) => observationId !== null));
+  const overlap = await snapshot("sim-p11-overlap", await stageIds(phase11Revision));
+  assert.equal(await service("publisher").release(overlap), "CREATED");
+  assert.equal(await positionPipeline("projector").project(overlap.snapshotId), "PROJECTED");
+  assert.deepEqual((await positionPipeline("reader").readRelease(overlap.snapshotId))?.facts, result.facts);
+  for (const position of allPositions) {
+    const run = () => position === "QB"
+      ? positionPipeline("reader").simulateQb(allSnapshot, replayRequest("QB"), advancedPolicy)
+      : positionPipeline("reader").simulateField(allSnapshot, replayRequest(position), positionPolicy(position));
+    const replay = await run();
+    assert.equal(replay?.label, "SIMULATION", position);
+    assert.equal(replay.rankingEligible, false);
+    assert.equal(replay.rating.status, "PROVISIONAL", position);
+    assert.deepEqual(await run(), replay, position);
+  }
+  const qb = await positionPipeline("reader").simulateQb(allSnapshot, {
+    ...replayRequest("QB"), stints: [{ ...replayRequest("QB").stints[0]!, expectedGameIds: [uuid("12"), uuid("13")] }],
+  }, advancedPolicy);
+  assert.equal(qb?.rating.status, "NOT_RATED");
+  assert.equal(qb.rating.reason, "INCOMPLETE_COVERAGE");
+});
+
+test("SIMULATION | zero, missing and N/A remain distinct in corrected snapshots and limited paths", async () => {
+  const revision = "sim-phase11-status";
+  const zero = positionObs(revision, 0);
+  const snapshotId = "sim-p11-special";
+  await releasePosition(manifest(revision, phase11Revision), [
+    fieldFixture(revision, "P", { returnedPunts: zero, returnedFieldPositionAboveExpected: na }),
+    fieldFixture(revision, "LS", { placekickSnaps: zero, accuratePlacekickSnaps: na }),
+    fieldFixture(revision, "RB", { passBlockFailures: absent, passBlockAssignments: absent }),
+    fieldFixture(revision, "CB", { nonTurnoverCoverageTargets: zero, nonTurnoverYardsAllowed: na }),
+    fieldFixture(revision, "KR", { cleanKickReturns: zero, kickReturnYardsAboveExpected: na, kickReturns: zero, kickReturnFumbles: na }),
+    fieldFixture(revision, "K", { fieldGoalAttempts: zero, fieldGoalsMade: na, expectedFieldGoalsByDistance: na }),
+    qbPositionFixture(revision, true),
+  ], snapshotId);
+  assert.equal(await positionPipeline("projector").project(snapshotId), "PROJECTED");
+  const reader = positionPipeline("reader");
+  const release = await reader.readRelease(snapshotId);
+  assert.ok(release);
+  const facts = new Map(release.facts.map((fact) => [fact.field, fact]));
+  assert.equal(facts.get("returnedPunts")?.observation.status, "VERIFIED_ZERO");
+  assert.ok(facts.get("returnedPunts")?.observationId);
+  for (const [field, status] of [["returnedFieldPositionAboveExpected", "NOT_APPLICABLE"], ["passBlockFailures", "MISSING"]]) {
+    assert.equal(facts.get(field!)?.observation.status, status);
+    assert.equal(facts.get(field!)?.observationId, null);
+  }
+  assert.equal((await reader.simulateField(snapshotId, replayRequest("P"), positionPolicy("P", "P_UNRETURNED_ONLY_V1")))?.rating.status, "PROVISIONAL");
+  assert.equal((await reader.simulateField(snapshotId, replayRequest("LS"), positionPolicy("LS", "LS_PUNT_SNAP_ONLY_V1")))?.rating.status, "PROVISIONAL");
+  for (const position of ["CB", "RB", "KR", "K"] as const) {
+    const result = await reader.simulateField(snapshotId, replayRequest(position), positionPolicy(position));
+    assert.equal(result?.rating.status, "NOT_RATED");
+  }
+  const rushOnly = {
+    version: { ...policy.version, path: "QB_RUSH_ONLY_SPECIAL", contextVersion: "sim-no-context" },
+    components: { rushingContribution: { weight: 1, score: ({ yardsPerAttempt }) => yardsPerAttempt } },
+    calibration: policy.calibration,
+  } satisfies QbSeasonSimulation;
+  assert.equal((await reader.simulateQb(snapshotId, replayRequest("QB"), rushOnly))?.rating.status, "PROVISIONAL");
+  const recovery = "sim-phase11-recovery";
+  await releasePosition(manifest(recovery, revision), [fieldFixture(recovery, "RB")], "sim-p11-recovery");
+  assert.equal(await positionPipeline("projector").project("sim-p11-recovery"), "PROJECTED");
+  const original = await reader.readRelease(allSnapshot);
+  const restored = await reader.readRelease("sim-p11-recovery");
+  const rbStageId = original?.snapshot.games.find(({ game }) => game.position === "RB")?.stageId;
+  const first = original?.facts.find(({ field, stageId }) => field === "passBlockFailures" && stageId === rbStageId);
+  const resumed = restored?.facts.find(({ field }) => field === "passBlockFailures");
+  assert.ok(first?.observationId && resumed?.observationId);
+  const { rows: [lineage] } = await admin.query("SELECT supersedes_id FROM efra.stat_observations WHERE id = $1", [resumed.observationId]);
+  assert.equal(lineage?.supersedes_id, first.observationId);
+});
+
+test("SIMULATION | conflicts retain source evidence in quarantine, and unapproved units roll back projection", async () => {
+  const revision = "sim-phase11-conflict";
+  const conflicted = fieldFixture(revision, "CB", {
+    nonTurnoverYardsAllowed: { status: "CONFLICTED", sources: [
+      { ...source, revisionId: revision }, { ...source, revisionId: "sim-counter-evidence" },
+    ] },
+  });
+  const plan = await resolve(manifest(revision), [conflicted]);
+  assert.equal(plan.rows[0]?.status, "QUARANTINE");
+  assert.equal(await writer().stage(plan), "STAGED");
+  const { rows: [stored] } = await actorPool("reviewer").query(`SELECT qc.conflicts FROM efra_ingest.quarantine_conflict qc
+    JOIN efra_ingest.import_batch b ON b.id = qc.batch_id JOIN efra_ingest.source_revision r ON r.id = b.revision_id
+    WHERE r.source_revision = $1`, [revision]);
+  assert.equal(stored?.conflicts[0].status, "CONFLICTED");
+  assert.equal(stored?.conflicts[0].field, "nonTurnoverYardsAllowed");
+  assert.equal(stored?.conflicts[0].sources.length, 2);
+  assert.deepEqual(await stageIds(revision), []);
+  const wrong = "sim-phase11-wrong-unit";
+  const mappingVersion = "sim-unit-mismatch";
+  await approveConventions(mappingVersion, "fieldGoalAttempts");
+  await releasePosition({ ...manifest(wrong, "sim-phase11-status"), mappingVersion }, [fieldFixture(wrong, "K")], "sim-p11-wrong-unit");
+  await assert.rejects(positionPipeline("projector").project("sim-p11-wrong-unit"), /provenance, feature or unit/);
+  assert.equal(await positionPipeline("reader").readRelease("sim-p11-wrong-unit"), null);
+});
+
+test("SIMULATION | exact legacy QB observations can be reused, but the old path cannot fork the status-aware history", async () => {
+  const prior = await service("reader").ratingReplayReference("sim-p10-original", "a".repeat(40), "b".repeat(64));
+  assert.ok(prior);
+  assert.equal(await positionPipeline("projector").project("sim-p10-original"), "PROJECTED");
+  const projected = await positionPipeline("reader").readRelease("sim-p10-original");
+  assert.ok(projected);
+  assert.deepEqual(projected.facts.filter(({ field }) => field.startsWith("passing.")).map(({ observationId }) => observationId).sort(),
+    prior.observationIds);
+  const rev = "sim-phase11-legacy-fork";
+  await releasePosition(manifest(rev, "sim-phase10-original"), [fixture(rev, 84)], "sim-p11-legacy-fork");
+  await assert.rejects(service("projector").project("sim-p11-legacy-fork", qbPassingProjection), /status-aware/);
+  await assert.rejects(positionPipeline("projector").project("sim-p11-legacy-fork"), /already superseded/);
+});
+
+test("SIMULATION | a competing registered synthetic source cannot duplicate a canonical metric", async () => {
+  const otherSource = "sim-other-source";
+  const otherId = uuid("14");
+  await admin.query("INSERT INTO efra.data_sources (id, code, name, reuse_status) VALUES ($1, $2, 'Synthetic competing source', 'unverified')",
+    [otherId, otherSource]);
+  await admin.query("INSERT INTO efra_ingest.synthetic_source VALUES ($1)", [otherId]);
+  await admin.query(`INSERT INTO efra.external_ids (source_id, entity_type, entity_id, external_key)
+    SELECT $1, entity_type, entity_id, external_key FROM efra.external_ids WHERE source_id = $2`, [otherId, uuid("01")]);
+  await admin.query(`INSERT INTO efra_ingest.season_alias (source_id, competition_id, external_key, season_id)
+    SELECT $1, competition_id, external_key, season_id FROM efra_ingest.season_alias WHERE source_id = $2`, [otherId, uuid("01")]);
+  await approveConventions("sim-uuid-map-v1", undefined, otherId);
+  const revision = "sim-phase11-competing-source";
+  const row = fieldFixture(revision, "K");
+  const field = row.game;
+  assert.ok(field.position !== "QB" && field.usage.status === "PLAYED");
+  const retag = (quality: typeof field.usage.source) => ({ ...quality, sourceId: otherSource });
+  await releasePosition({ ...manifest(revision), sourceId: otherSource }, [{ ...row, game: {
+    ...field, usage: { status: "PLAYED", source: retag(field.usage.source) },
+    stats: { ...field.stats, observations: Object.fromEntries(Object.entries(field.stats.observations).map(([key, value]) => [
+      key, value && "source" in value ? { ...value, source: retag(value.source) } : value,
+    ])) },
+  } }], "sim-p11-competing-source");
+  await assert.rejects(positionPipeline("projector").project("sim-p11-competing-source"), /requires reconciliation/);
+  assert.equal(await positionPipeline("reader").readRelease("sim-p11-competing-source"), null);
 });

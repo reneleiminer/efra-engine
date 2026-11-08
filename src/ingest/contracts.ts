@@ -1,4 +1,4 @@
-import type { DataOrigin } from "../contracts/observations.ts";
+import type { DataOrigin, SourceQuality } from "../contracts/observations.ts";
 import type { GameStatistics, QbGame } from "../contracts/statistics.ts";
 import type { FieldPosition, FieldStatistics } from "../models/positions/catalog.ts";
 
@@ -38,7 +38,10 @@ export type ImportRowDecision = {
   readonly issues: readonly ImportQualityIssue[];
 } & (
   | { readonly status: "STAGE" | "STAGE_INCOMPLETE"; readonly candidate: ImportCandidate }
-  | { readonly status: "QUARANTINE" }
+  | {
+      readonly status: "QUARANTINE";
+      readonly conflicts?: readonly { readonly field: string; readonly status: "CONFLICTED"; readonly sources: readonly SourceQuality[] }[];
+    }
 );
 
 export type ImportPlan =

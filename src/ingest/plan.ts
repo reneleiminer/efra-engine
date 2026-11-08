@@ -4,9 +4,11 @@ import { timestamp } from "../contracts/time.ts";
 import { describePositionModel } from "../models/positions/catalog.ts";
 import { describePositionDataRequirements } from "../models/positions/data-requirements.ts";
 import { readComponent } from "../models/positions/evidence.ts";
+import { gameObservations } from "../models/positions/metric-registry.ts";
 import { assessQbCore } from "../models/qb/core.ts";
 import { compareId } from "../season/scope.ts";
 import type { ImportCandidate, ImportManifest, ImportPlan, ImportQualityIssue, ImportRowDecision, ImportSourcePolicy } from "./contracts.ts";
+import { canonicalJson, compareImportDecisions } from "./determinism.ts";
 
 export function planImport(
   manifest: ImportManifest,
@@ -35,16 +37,25 @@ export function planImport(
     if ((countsByRecord.get(sourceRecordId) ?? 0) > 1) issues.add("DUPLICATE_RECORD");
     if ((countsByGamePosition.get(gamePositionKey(candidate)) ?? 0) > 1) issues.add("DUPLICATE_GAME_POSITION");
     const ordered = [...issues].sort();
-    if (ordered.some((issue) => issue !== "CORE_INCOMPLETE")) return { sourceRecordId, issues: ordered, status: "QUARANTINE" };
+    if (ordered.some((issue) => issue !== "CORE_INCOMPLETE")) {
+      const conflicts = candidateConflicts(candidate);
+      return { sourceRecordId, issues: ordered, status: "QUARANTINE", ...(conflicts.length && { conflicts }) };
+    }
     return { sourceRecordId, issues: ordered, status: issues.size ? "STAGE_INCOMPLETE" : "STAGE", candidate };
-  }).sort((left, right) => compareId(left.sourceRecordId, right.sourceRecordId)
-    || compareId(left.issues.join(","), right.issues.join(",")));
+  }).sort(compareImportDecisions);
 
   const batchKey = JSON.stringify([
     manifest.sourceId, manifest.competitionId, manifest.seasonId, manifest.sourceRevision,
     manifest.mappingVersion, manifest.schemaVersion, manifest.payloadSha256,
   ]);
   return { status: "DRY_RUN", label: "SIMULATION", manifest, batchKey, rows };
+}
+
+export function candidateConflicts(candidate: ImportCandidate) {
+  return Object.entries(gameObservations(candidate.game)).sort(([left], [right]) => compareId(left, right))
+    .flatMap(([field, observation]) => observation?.status === "CONFLICTED"
+      ? [{ field, status: observation.status, sources: [...observation.sources].sort((left, right) =>
+        compareId(canonicalJson(left), canonicalJson(right))) }] : []);
 }
 
 function assessCandidate({ sourceRecordId, game }: ImportCandidate, manifest: ImportManifest): Set<ImportQualityIssue> {

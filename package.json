@@ -14,6 +14,7 @@
   },
   "scripts": {
     "matrix": "node scripts/position-matrix.mjs",
+    "registry:sql": "node scripts/generate-metric-registry.mjs",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json",
     "test": "npm run typecheck && node --test test/*.test.ts",

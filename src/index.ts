@@ -45,3 +45,14 @@ export type { PrivateValidationReport } from "./validation/postgres-holdout.ts";
 export {
   PostgresValidationApprover, PostgresValidationCustodian, PostgresValidationResearcher, PostgresValidationWorker,
 } from "./validation/postgres-holdout.ts";
+
+export type * from "./pilot/signatures.ts";
+export { pilotPublicKey, sha256Bytes, signPilot } from "./pilot/signatures.ts";
+export type * from "./pilot/worker.ts";
+export { createVerifiedPilotWorker, PostgresPilotApprover, serializePilotStudyArtifacts, verifyPilotReport } from "./pilot/worker.ts";
+export type * from "./pilot/sessions.ts";
+export { authorizePilotAction, bindPilotAction, executePilotAction } from "./pilot/sessions.ts";
+export type * from "./pilot/isolation.ts";
+export { validatePilotIsolation, withPilotConnection } from "./pilot/isolation.ts";
+export type * from "./pilot/monitoring.ts";
+export { PilotOperationError } from "./pilot/monitoring.ts";

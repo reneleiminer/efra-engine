@@ -18,11 +18,51 @@ export interface PrivateValidationReport {
   readonly bridgeExclusions: readonly { readonly partition: string; readonly id: string; readonly issues: readonly string[] }[];
 }
 
+export function privateValidationReport(dataset: CanonicalValidationDataset, result: PrivateValidationReport["result"]): PrivateValidationReport {
+  return {
+    datasetSha256: dataset.datasetSha256, engineArtifactSha256: dataset.engineArtifactSha256,
+    modelArtifactSha256: dataset.modelArtifactSha256, result,
+    bridgeExclusions: dataset.batches.flatMap(({ partition, payload }) => payload.flatMap(({ sample, issues }) =>
+      issues.length ? [{ partition, id: sample.id, issues }] : [])),
+  };
+}
+
+export async function executeSealedHoldout(
+  db: Database, id: string, runId: string, engineDigest: string,
+  compute: (dataset: CanonicalValidationDataset) => Promise<PrivateValidationReport> | PrivateValidationReport,
+  pilot?: { readonly datasetSha256: string; readonly runManifestSha256: string },
+) {
+  const { rows: [claim] } = pilot
+    ? await db.query<{ ticket: string }>("SELECT efra_validation.claim_pilot_evaluation($1,$2,$3,$4,$5) AS ticket",
+      [id, runId, engineDigest, pilot.datasetSha256, pilot.runManifestSha256])
+    : await db.query<{ ticket: string }>("SELECT efra_validation.claim_evaluation($1,$2,$3) AS ticket", [id, runId, engineDigest]);
+  requireValid(claim, "Missing committed evaluation ticket");
+  const { rows: [row] } = await db.query<{ payload: CanonicalValidationDataset }>(
+    "SELECT efra_validation.read_evaluation($1) AS payload", [claim.ticket],
+  );
+  requireValid(row, "Missing evaluation payload");
+  let report: PrivateValidationReport;
+  try {
+    const { datasetSha256, ...contents } = row.payload;
+    requireValid(datasetSha256 === canonicalSha256(contents), "Sealed dataset digest mismatch");
+    requireValid(contents.recipeSha256 === canonicalSha256(contents.recipe), "Sealed recipe digest mismatch");
+    requireValid(contents.engineArtifactSha256 === engineDigest, "Worker artifact does not match the approved study");
+    report = await compute(row.payload);
+  } catch {
+    await db.query("SELECT efra_validation.record_report($1,$2,NULL::jsonb)", [id, runId]);
+    throw new Error("Sealed evaluation failed. See the private audit journal.");
+  }
+  await db.query("SELECT efra_validation.record_report($1,$2,$3::jsonb)", [id, runId, report]);
+  return { label: "SIMULATION" as const, datasetSha256: report.datasetSha256, officialEligible: false as const };
+}
+
 export class PostgresValidationCustodian {
   readonly #db: Database;
+  readonly #vault: Database;
 
-  constructor(db: Database) {
+  constructor(db: Database, vault: Database = db) {
     this.#db = db;
+    this.#vault = vault;
   }
 
   async #readRelease(snapshotId: string) {
@@ -45,7 +85,7 @@ export class PostgresValidationCustodian {
 
   async seal(id: string, researcherSubject: string, recipe: CanonicalValidationRecipe) {
     const dataset = await compileCanonicalValidation((snapshotId) => this.#readRelease(snapshotId), recipe);
-    const { rows: [row] } = await this.#db.query<{ status: "SEALED" | "ALREADY_SEALED" }>(
+    const { rows: [row] } = await this.#vault.query<{ status: "SEALED" | "ALREADY_SEALED" }>(
       "SELECT efra_validation.seal($1,$2,$3,$4::jsonb) AS status", [id, dataset.datasetSha256, researcherSubject, dataset],
     );
     requireValid(row, "Dataset sealing did not return a status");
@@ -137,32 +177,7 @@ export class PostgresValidationWorker {
   }
 
   async evaluate(id: string, runId: string) {
-    // Commit the consumption and authorization before the database will deliver the payload.
-    const { rows: [claim] } = await this.#db.query<{ ticket: string }>(
-      "SELECT efra_validation.claim_evaluation($1,$2,$3) AS ticket", [id, runId, this.#engineArtifactSha256],
-    );
-    requireValid(claim, "Missing committed evaluation ticket");
-    const { rows: [row] } = await this.#db.query<{ payload: CanonicalValidationDataset }>(
-      "SELECT efra_validation.read_evaluation($1) AS payload", [claim.ticket],
-    );
-    requireValid(row, "Missing evaluation payload");
-    let report: PrivateValidationReport;
-    try {
-      const { datasetSha256, ...contents } = row.payload;
-      requireValid(datasetSha256 === canonicalSha256(contents), "Sealed dataset digest mismatch");
-      requireValid(contents.recipeSha256 === canonicalSha256(contents.recipe), "Sealed recipe digest mismatch");
-      requireValid(contents.engineArtifactSha256 === this.#engineArtifactSha256, "Worker artifact does not match the approved study");
-      report = {
-        datasetSha256, engineArtifactSha256: contents.engineArtifactSha256,
-        modelArtifactSha256: contents.modelArtifactSha256, result: runSyntheticValidation(contents.study),
-        bridgeExclusions: contents.batches.flatMap(({ partition, payload }) => payload.flatMap(({ sample, issues }) =>
-          issues.length ? [{ partition, id: sample.id, issues }] : [])),
-      };
-    } catch {
-      await this.#db.query("SELECT efra_validation.record_report($1,$2,NULL::jsonb)", [id, runId]);
-      throw new Error("Sealed evaluation failed. See the private audit journal.");
-    }
-    await this.#db.query("SELECT efra_validation.record_report($1,$2,$3::jsonb)", [id, runId, report]);
-    return { label: "SIMULATION" as const, datasetSha256: report.datasetSha256, officialEligible: false as const };
+    return executeSealedHoldout(this.#db, id, runId, this.#engineArtifactSha256,
+      (dataset) => privateValidationReport(dataset, runSyntheticValidation(dataset.study)));
   }
 }

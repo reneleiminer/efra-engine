@@ -4,7 +4,7 @@ import { constants } from "node:fs";
 import { open, readFile, rename, writeFile } from "node:fs/promises";
 import { setTimeout } from "node:timers/promises";
 import pg from "pg";
-import { createVerifiedPilotWorker, pilotPublicKey, withPilotConnection, PilotOperationError } from "../../dist/index.js";
+import { createVerifiedPilotWorker, pilotPublicKey, sha256Bytes, withPilotConnection, PilotOperationError } from "../../dist/index.js";
 import { FilePilotSecretBroker } from "../../dist/pilot/file-broker.js";
 import { alertForPilotFailure, resumePilotRun } from "../../dist/pilot/operations.js";
 import { pilotFailure } from "../../dist/pilot/monitoring.js";
@@ -28,7 +28,8 @@ async function readJob(file) {
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size === 0 || stat.size > 512 * 1024) throw new Error("Invalid local job size");
-    return JSON.parse(await handle.readFile("utf8"));
+    const bytes = await handle.readFile();
+    return { job: JSON.parse(bytes.toString("utf8")), jobSha256: sha256Bytes(bytes) };
   } finally {
     await handle.close();
   }
@@ -101,20 +102,20 @@ try {
     throw new Error("Invalid local queue bounds");
   }
   for (let sequence = start; sequence < start + count; sequence++) {
-    const job = await waitForJob(inbox + "/job-" + sequence + ".json");
+    const { job, jobSha256 } = await waitForJob(inbox + "/job-" + sequence + ".json");
     const base = outbox + "/receipt-" + sequence + ".json";
     const completed = await readFile(base, "utf8").then(JSON.parse, (error) => {
       if (error.code !== "ENOENT") throw error;
       return null;
     });
     if (completed) {
-      if (completed.runId !== job.run.body.runId || completed.datasetSha256 !== job.run.body.datasetSha256
+      if (completed.jobSha256 !== jobSha256 || completed.runId !== job.run.body.runId || completed.datasetSha256 !== job.run.body.datasetSha256
         || completed.label !== "SIMULATION" || completed.officialEligible !== false) throw new Error("Receipt mismatch");
       continue;
     }
     const receipt = await run(job);
     const temporary = base + "." + randomUUID() + ".tmp";
-    await writeFile(temporary, JSON.stringify(receipt), { mode: 0o600, flag: "wx" });
+    await writeFile(temporary, JSON.stringify({ ...receipt, jobSha256 }), { mode: 0o600, flag: "wx" });
     await rename(temporary, base);
   }
 } catch (error) {

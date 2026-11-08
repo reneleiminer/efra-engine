@@ -946,15 +946,17 @@ test("SIMULATION | pilot locks the measured bundle and signed report across a co
     const version = "lease-" + sequence;
     await writeJobFile("leases", "worker-lease.json", JSON.stringify({ reference: "worker-lease", service: "holdout-worker",
       environment, version, login: "efra_vault_p13_worker", password, expiresAt: Date.now() + 300_000 }));
-    await writeJobFile("inbox", "job-" + sequence + ".json", JSON.stringify({
+    const job = JSON.stringify({
       version: "efra-local-pilot-job-v1", engine: engineManifest, run: signedRun,
       model: artifacts.model.toString("base64"), configuration: artifacts.configuration.toString("base64"),
-    }));
+    });
+    await writeJobFile("inbox", "job-" + sequence + ".json", job);
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       try {
         const receipt = JSON.parse(await readFile("/run/pilot-outbox/receipt-" + sequence + ".json", "utf8"));
-        assert.deepEqual(receipt, { label: "SIMULATION", officialEligible: false, datasetSha256, runId, leaseVersion: version });
+        assert.deepEqual(receipt, { label: "SIMULATION", officialEligible: false, datasetSha256, runId, leaseVersion: version,
+          jobSha256: sha256Bytes(Buffer.from(job)) });
         return;
       } catch (error) {
         if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) throw error;
@@ -1019,11 +1021,11 @@ test("SIMULATION | pilot locks the measured bundle and signed report across a co
       "RUN-next": { purpose: "RUN", pem: next.publicKey.export({ format: "pem", type: "spki" }).toString() },
     }));
     await executeContainer(2, rotated, nextAuthorization);
-    await writeJobFile("inbox", "job-3.json", JSON.stringify({
-      version: "efra-local-pilot-job-v1", engine: engineManifest,
+    const tampered = JSON.stringify({ version: "efra-local-pilot-job-v1", engine: engineManifest,
       run: { ...nextAuthorization, body: { ...body, configurationSha256: "0".repeat(64) } },
-      model: artifacts.model.toString("base64"), configuration: artifacts.configuration.toString("base64"),
-    }));
+      model: artifacts.model.toString("base64"), configuration: artifacts.configuration.toString("base64") });
+    await writeJobFile("inbox", "job-3.json", tampered);
+    await writeJobFile("inbox", "job-4.json", tampered);
   }
   keys.delete("RUN");
   await assert.rejects(worker.evaluate(dataset, runId, authorization, artifacts), { failure: "INTEGRITY_OR_EXECUTION" });

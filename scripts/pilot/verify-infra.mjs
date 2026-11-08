@@ -81,6 +81,14 @@ function sql(service, database, command) {
 }
 const checkpointSql = `SELECT jsonb_build_object(
   'migrations', (SELECT jsonb_agg(jsonb_build_array(version,name,sha256) ORDER BY version) FROM efra_migrations.journal),
+  'roles', (SELECT jsonb_agg(jsonb_build_array(rolname,rolcanlogin,rolsuper,rolcreaterole,rolcreatedb,
+    rolreplication,rolbypassrls,rolinherit) ORDER BY rolname) FROM pg_roles WHERE rolname LIKE 'efra%'),
+  'membership', (SELECT jsonb_agg(jsonb_build_array(r.rolname,m.rolname,g.rolname,
+    a.admin_option,a.inherit_option,a.set_option) ORDER BY r.rolname,m.rolname,g.rolname)
+    FROM pg_auth_members a JOIN pg_roles r ON r.oid=a.roleid JOIN pg_roles m ON m.oid=a.member
+    JOIN pg_roles g ON g.oid=a.grantor WHERE r.rolname LIKE 'efra%' OR m.rolname LIKE 'efra%'),
+  'ingestPrincipals', (SELECT jsonb_agg(to_jsonb(p) - 'login_oid' ORDER BY login_role) FROM efra_ingest.authenticated_principal p),
+  'validationPrincipals', (SELECT jsonb_agg(to_jsonb(p) - 'login_oid' ORDER BY login) FROM efra_validation.principal p),
   'canonical', (SELECT jsonb_agg(to_jsonb(o) ORDER BY id) FROM efra.stat_observations o),
   'projections', (SELECT jsonb_agg(to_jsonb(p) ORDER BY snapshot_id) FROM efra_ingest.position_projection p),
   'data', (SELECT jsonb_agg(to_jsonb(d) ORDER BY id) FROM efra_validation.dataset d),
@@ -113,6 +121,9 @@ function verifyResumeAndAlert() {
   const before = auditCount();
   compose(["run", "--rm", "--no-deps", "worker"], { stream: true });
   assert.equal(auditCount(), before, "Worker restart attempted to reconsume a completed job");
+  // Use the already-completed first receipt for the tampered fourth slot.
+  compose(["run", "--rm", "--no-deps", "worker", "node", "-e",
+    "require('node:fs').copyFileSync('/run/pilot-outbox/receipt-1.json','/run/pilot-outbox/receipt-4.json',require('node:fs').constants.COPYFILE_EXCL)"]);
   const rejected = invokeDocker([...composeArgs, "run", "--rm", "--no-deps", "-e", "EFRA_PILOT_START_JOB=3",
     "-e", "EFRA_PILOT_JOB_COUNT=1", "worker"]);
   assert.equal(rejected.status, 1, "Tampered job did not fail closed");
@@ -121,6 +132,10 @@ function verifyResumeAndAlert() {
     [{ event: "PILOT_ALERT", severity: "critical", code: "INTEGRITY_OR_EXECUTION" }]);
   assert.equal(events.filter(({ schema, outcome, failure }) =>
     schema === "efra-pilot-event-v1" && outcome === "failure" && failure === "INTEGRITY_OR_EXECUTION").length, 1);
+  const resumed = invokeDocker([...composeArgs, "run", "--rm", "--no-deps", "-e", "EFRA_PILOT_START_JOB=4",
+    "-e", "EFRA_PILOT_JOB_COUNT=1", "worker"]);
+  assert.equal(resumed.status, 1, "Changed completed job did not fail closed");
+  assert.ok(resumed.stdout.toString().includes('"event":"PILOT_ALERT"'));
   assert.equal(auditCount(), before, "Tampered job reached the holdout");
   emit({ event: "PILOT_RESTART_AND_ALERT_VERIFIED", scope: "SYNTHETIC_ONLY" });
 }

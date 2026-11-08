@@ -1,5 +1,7 @@
 # PostgreSQL-Staging und Neon-Kompatibilität
 
+Der ursprüngliche Staging-Stand wird durch die [isolierte Neon-Integration mit UUID-Auflösung, Rollen und End-to-End-Bericht](neon-integration.md) ergänzt.
+
 ## Implementiert
 
 Die versionierten Migrationen [001](../db/migrations/001_ingest_staging.sql) und [002](../db/migrations/002_ingest_review_snapshots.sql) legen das eigenständige Schema **efra_ingest** an. Es enthält Quellenrevisionen, Import-Batches, Staging-Zeilen, Quarantäne, Review-Entscheidungen und freigegebene **synthetische Datensnapshots**. Alle Tabellen sind append-only. Der Adapter erzeugt weder Spielerbewertungen noch Ranglisten.

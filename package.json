@@ -18,6 +18,7 @@
     "typecheck": "tsc -p tsconfig.test.json",
     "test": "npm run typecheck && node --test test/*.test.ts",
     "test:postgres": "node --test test/postgres.integration.ts",
+    "test:neon-integration": "node --test test/neon.integration.ts",
     "test:coverage": "npm run typecheck && node --test --experimental-test-coverage --test-coverage-include=src/** test/*.test.ts"
   },
   "devDependencies": {

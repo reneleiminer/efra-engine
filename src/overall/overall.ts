@@ -96,12 +96,23 @@ export function calculateOverall(
 }
 
 function validSimulationVersion(version: ModelVersion): boolean {
-  return version.maturity === "UNVALIDATED_SIMULATION"
-    && (version.path === "QB_STANDARD_CORE" || version.path === "QB_ADVANCED")
-    && [version.methodVersion, version.parameterVersion, version.contextVersion].every((id) => id.trim() !== "");
+  if (version.maturity !== "UNVALIDATED_SIMULATION"
+    || [version.methodVersion, version.parameterVersion, version.contextVersion].some((id) => !id.trim())) return false;
+  switch (version.path) {
+    case "QB_STANDARD_CORE":
+      return version.firstDownDefinitionVersion === undefined && version.situationDefinitionVersion === undefined;
+    case "QB_EXTENDED_PRODUCTION":
+      return !!version.firstDownDefinitionVersion?.trim() && version.situationDefinitionVersion === undefined;
+    case "QB_ADVANCED":
+      return !!version.firstDownDefinitionVersion?.trim() && !!version.situationDefinitionVersion?.trim();
+    default:
+      return false;
+  }
 }
 
 function sameVersion(left: ModelVersion, right: ModelVersion): boolean {
   return left.maturity === right.maturity && left.path === right.path && left.methodVersion === right.methodVersion
-    && left.parameterVersion === right.parameterVersion && left.contextVersion === right.contextVersion;
+    && left.parameterVersion === right.parameterVersion && left.contextVersion === right.contextVersion
+    && left.firstDownDefinitionVersion === right.firstDownDefinitionVersion
+    && left.situationDefinitionVersion === right.situationDefinitionVersion;
 }

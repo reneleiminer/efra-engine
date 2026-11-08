@@ -62,6 +62,12 @@ export interface QbStatistics {
   >>;
   readonly rushing: Readonly<Record<"attempts" | "yards" | "touchdowns" | "turnovers", Observation>>;
   readonly situation: Readonly<Record<"opportunities" | "actualPointsAdded" | "expectedPointsAdded", Observation>>;
+  readonly advancedPassing?: {
+    readonly definitionVersion: string;
+    readonly nonTouchdownFirstDowns: Observation;
+  };
+  /** Situational sacks attributed to the QB and excluded from both passing and rushing attempts. */
+  readonly situationDefinitionVersion?: string;
 }
 
 export type QbGame = GameStatistics<"QB", QbStatistics>;

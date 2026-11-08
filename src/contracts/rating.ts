@@ -4,11 +4,11 @@ import type { Position } from "./statistics.ts";
 export type RatingKind = "SEASON_PERFORMANCE" | "OVERALL";
 export type RatingStatus = "NOT_RATED" | "PROVISIONAL" | "OFFICIAL";
 export type RatingFlag = "UNDER_REVIEW" | "SUSPENDED" | "STALE" | "SUPERSEDED";
-export type QbPath = "QB_STANDARD_CORE" | "QB_ADVANCED" | "QB_RUSH_ONLY_SPECIAL";
+export type QbPath = "QB_STANDARD_CORE" | "QB_EXTENDED_PRODUCTION" | "QB_ADVANCED" | "QB_RUSH_ONLY_SPECIAL";
 export type RatingReason = "REAL_DATA_DISABLED" | "INVALID_SCOPE" | "INCOMPLETE_COVERAGE"
   | "UNVERIFIED_USAGE" | "NO_PASSING_EXPOSURE" | "MISSING_CORE" | "UNUSABLE_CORE"
   | "INVALID_CORE" | "MISSING_COMPONENT" | "NO_VALIDATED_MODEL_PATH" | "INVALID_MODEL_OUTPUT"
-  | "NO_COMPATIBLE_HISTORY";
+  | "NO_COMPATIBLE_HISTORY" | "PASSING_EXPOSURE_IN_RUSH_ONLY";
 
 export interface ModelVersion {
   readonly methodVersion: string;
@@ -16,6 +16,8 @@ export interface ModelVersion {
   readonly contextVersion: string;
   readonly path: QbPath;
   readonly maturity: "UNVALIDATED_SIMULATION";
+  readonly firstDownDefinitionVersion?: string;
+  readonly situationDefinitionVersion?: string;
 }
 
 export interface Confidence {

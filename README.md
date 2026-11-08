@@ -62,3 +62,5 @@ Das [Studienprotokoll für die Modellvalidierung](docs/model-validation.md) besc
 Die [kanonische Validierungsbrücke und Holdout-Verwaltung](docs/canonical-validation-holdout.md) verbindet synthetische kanonische Releases mit dem Studienprotokoll und dokumentiert Rechte, Prüfpfade und offene Freigabeschritte.
 
 Die [Sicherheitsgrundlage für den synthetischen Pilotbetrieb](docs/pilot-security.md) beschreibt isolierte Endpunkte, authentifizierte Aktionen, signierte Läufe und Berichte sowie Betriebs- und Wiederherstellungsprüfungen.
+
+Das [lokale synthetische Pilotprofil](docs/secure-pilot-infrastructure.md) startet mit `npm run pilot:verify`. Die Abnahme prüft isolierte PostgreSQL-Instanzen, Worker, Rotation, Alarmierung und den Backup- und Restore-Pfad.
